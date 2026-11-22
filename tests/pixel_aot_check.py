@@ -3881,18 +3881,24 @@ def vop2_integer_group() -> list[str]:
     ])
 
 
-def align_integer_group() -> list[str]:
-    return with_constants([
+def align_integer_group(byte=False, swapped=False) -> list[str]:
+    op = "v_alignbyte_b32" if byte else "v_alignbit_b32"
+    first, last = (1, 3) if byte else (4, 31)
+    left, right = ("v18", "s44") if swapped else ("s44", "v18")
+    return uncompressed_export([
         "v_mov_b32_e32 v18, s45",
-        "v_alignbit_b32 v12, s44, v18, 4",
-        "v_alignbit_b32 v13, s44, v18, 0",
-        "v_alignbit_b32 v14, s44, v18, 31",
-        "v_alignbit_b32 v15, s44, v18, s46",
-        "v_alignbyte_b32 v12, s44, v18, 1",
-        "v_alignbyte_b32 v13, s44, v18, 0",
-        "v_alignbyte_b32 v14, s44, v18, 3",
-        "v_alignbyte_b32 v15, s44, v18, s46",
+        f"{op} v12, {left}, {right}, {first}",
+        f"{op} v13, {left}, {right}, 0",
+        f"{op} v14, {left}, {right}, {last}",
+        f"{op} v18, {left}, {right}, s46",
+        "v_mov_b32_e32 v15, v18",
     ])
+
+
+def align_reference(a, b, count, byte=False):
+    shifts = (1, 0, 3, count & 3) if byte else (4, 0, 31, count & 31)
+    joined = (a << 32) | b
+    return tuple((joined >> (shift * (8 if byte else 1))) & 0xffffffff for shift in shifts)
 
 
 # Bodies for uncompressed_export(): s44 = A and s45 = B from the constants, v18 = B, and each channel v12..v15
@@ -4335,7 +4341,11 @@ def check_controls(directory):
         "v_and_b32_e32 v12, s44, v106",
     ):
         must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", bad_vop2]))
-    align_source = translate(align_integer_group())
+    assert align_reference(0x12345678, 0x9abcdef0, 32) == (
+        0x89abcdef, 0x9abcdef0, 0x2468acf1, 0x9abcdef0)
+    assert align_reference(0x12345678, 0x9abcdef0, 4, True) == (
+        0x789abcde, 0x9abcdef0, 0x3456789a, 0x9abcdef0)
+    align_source = "\n".join(translate_int(align_integer_group(byte)) for byte in (False, True))
     assert set(VOP3_ALIGN_OPS) <= ACCEPTED
     for expected in (
         "((4u & 31u) == 0u ? asuint(alu20) : ((asuint(alu20) >> (4u & 31u)) | (asuint(params[0].w) << (32u - (4u & 31u)))))",
@@ -5277,6 +5287,7 @@ def check_binary(directory, assembler, objcopy, library):
                 (rounding(), translate), (arithmetic(), translate), (with_scalar_constant_reads(), translate), (with_scalar_pair_reads(), translate),
                 (truncate_values(), translate), (affine_coordinates(), translate), (ceiling(), translate),
                 (scalar64(), translate), (sopk_scalar(), translate), (sopk_cmpk_cmovk(), translate_int)]
+    fixtures.extend((align_integer_group(byte), translate_int) for byte in (False, True))
     fixtures.append((rgb_sample(), translate))
     fixtures.append((with_constants(TRIG_BODY), translate))
     fixtures.append((with_constants(CLASS_BODY), translate))
@@ -5621,6 +5632,33 @@ def binary32_normal_or_zero(word):
     return 0 < exponent < 0xff or word & 0x7fffffff == 0
 
 
+def check_align_draws(directory, compiler, renderer, backend):
+    source, shader = directory / "align.hlsl", directory / "align.cso"
+    pairs = ((0x12345678, 0x23456789), (0x3f123456, 0x40123456), (0x89abcdef, 0x91234567))
+    for byte in (False, True):
+        cases = []
+        for a, b in pairs:
+            for count in (0, 1, 3, 4, 31, 32, 63, 0xffffffff):
+                constants = bytearray(256)
+                struct.pack_into("<3I", constants, 12, a, b, count)
+                words = align_reference(a, b, count, byte)
+                assert all(binary32_normal_or_zero(w) for w in (a, b, *words))
+                path = directory / f"align-{byte}-{len(cases)}.case"
+                path.write_bytes(constants + struct.pack("<4I", *words) * 64 + b"\x01")
+                cases.append((path, "pass"))
+        wrong = directory / f"align-wrong-{byte}.case"
+        data = bytearray(cases[0][0].read_bytes())
+        data[256] ^= 1
+        wrong.write_bytes(data)
+        for swapped in (False, True):
+            source.write_text(translate_int(align_integer_group(byte, swapped)), encoding="ascii")
+            compile_shader(compiler, source, shader)
+            batch = [(path, "mismatch" if swapped else status) for path, status in cases]
+            if not swapped:
+                batch.insert(1, (wrong, "mismatch"))
+            run_pixel_batch(renderer, backend, shader, batch)
+
+
 def check_integer_nc_draws(directory, compiler, renderer, backend):
     """Draw the 32-bit no-carry add/sub forms through the integer readback target and compare the words.
 
@@ -5642,6 +5680,7 @@ def check_integer_nc_draws(directory, compiler, renderer, backend):
         assert all(binary32_normal_or_zero(word) for word in (a, b, *words)), (group, hex(a), hex(b))
         return words
 
+    check_align_draws(directory, compiler, renderer, backend)
     for group, rows in ((1, NC_INT_ROWS), (2, NC_INT_ROWS), (3, NC_INT_ROWS[2:3])):
         source.write_text(translate_int(uncompressed_export(nc_integer_group(group))), encoding="ascii")
         compile_shader(compiler, source, shader)

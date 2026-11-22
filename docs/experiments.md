@@ -2992,3 +2992,25 @@ readback on RTX 4060 Laptop and WARP sampled 0.25 and 0.75 and compared them to
 0.5, yielding 0 and 1. Reversing the ordinary wrap/clamp descriptors exchanged
 only the sampled values. Reversing the comparison descriptors exchanged only
 the two comparison results.
+
+## Independent bit and byte alignment readback
+
+The `pixel_aot_integer_nc_warp` and `pixel_aot_integer_nc_hardware` fixtures also
+run separate `v_alignbit_b32` and `v_alignbyte_b32` programs. Both are included in
+the source-built binary round trip. Each exports four observable UINT channels;
+the variable-count instruction aliases its second source and destination.
+
+Each operation has 24 input/reference cases from three asymmetric word pairs
+and eight counts, including zero, the largest masked shift and wrapped counts.
+References use Python's 64-bit concatenation and shift. Input and output words
+avoid NaN and subnormal encodings so float register transport cannot obscure the
+instruction comparison. A wrong expected word is surrounded by correct cases;
+a separately compiled shader with reversed inputs must fail every reference.
+
+```powershell
+ctest --preset dev --no-tests=error -R '^pixel_aot_integer_nc_(warp|hardware)$' -V
+```
+
+Python-only controls check explicit reference words and translator acceptance.
+Those controls do not establish GPU execution; the command above must pass on
+the named backend before recording readback evidence.
