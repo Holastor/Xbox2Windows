@@ -2353,21 +2353,8 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
             packed = f"(fma{i}_p & 0xffff0000u) | pack16_rne(fma{i})"
             vector[dst] = f"alu{i}"
             lines.append(f"    precise float alu{i} = asfloat({packed});")
-        elif m := match(rf"v_div_scale_f32(?:_e64)? (v\d+), {LANE_MASK}, ([^,]+), ([^,]+), ([^,]+)"):
-            vdst, sdst, src0, src1, src2 = m.groups()
-            regs = lane_mask(sdst)
-            if mask != "entry" or pending.intersection(regs) or not 0 <= int(vdst[1:]) <= 255:
-                raise ValueError("Invalid div_scale operation")
-            if vdst in sample_dest:
-                raise ValueError("Write overlaps an outstanding sample")
-            s0 = fp_operand(src0, scalar, vector, pending, sample_dest)
-            s1 = fp_operand(src1, scalar, vector, pending, sample_dest)
-            s2 = fp_operand(src2, scalar, vector, pending, sample_dest)
-            for j, reg in enumerate(regs):
-                scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
-            lines.append(f"    bool cmp{i} = (abs({s1}) < asfloat(0x0c800000u) || abs({s1}) > asfloat(0x70800000u));")
-            vector[vdst] = f"alu{i}"
-            lines.append(f"    precise float alu{i} = cmp{i} ? (asfloat(0x4f800000u) * {s0}) : {s0};")
+        elif re.fullmatch(r"v_div_scale_f32(?:_e64)? .+", line):
+            raise ValueError("Unverified v_div_scale_f32 prescaling and VCC semantics")
         elif m := match(r"v_div_fmas_f32(?:_e64)? (v\d+), (.+)"):
             dst, rest = m.groups()
             if mask != "entry" or not 0 <= int(dst[1:]) <= 255:

@@ -1883,9 +1883,6 @@ class TestRdna2Scanner(unittest.TestCase):
             "v_fma_f16 v0, v1, v2, v3 op_sel:[1,0,1] clamp",
             "v_fma_f16 v0, v1, v2, v3 clamp op_sel:[1,0,1]",
             "v_fma_f16 v0, -v1, |v2|, 0.5 op_sel:[0,1,0]",
-            "v_div_scale_f32 v0, vcc_lo, v1, v2, v3",
-            "v_div_scale_f32_e64 v0, vcc, v1, v2, v3",
-            "v_div_scale_f32 v0, s52, v1, v2, v3",
             "v_div_fmas_f32 v0, v1, v2, v3",
             "v_div_fmas_f32_e64 v0, v1, v2, v3",
             "v_div_fmas_f32 v0, v1, v2, v3 clamp",
@@ -1894,6 +1891,9 @@ class TestRdna2Scanner(unittest.TestCase):
             self.assertTrue(is_instruction_supported(insn), f"Expected supported: {insn}")
 
         invalid_insns = [
+            "v_div_scale_f32 v0, vcc_lo, v1, v2, v3",
+            "v_div_scale_f32_e64 v0, vcc, v1, v2, v3",
+            "v_div_scale_f32 v0, s52, v1, v2, v3",
             "v_fma_f16 v0, v1, v2",
             "v_fma_f16 v0, v1, v2, v3 omod:2",
             "v_div_scale_f32 v0, v1, v2, v3",

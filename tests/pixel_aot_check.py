@@ -1994,11 +1994,12 @@ def valu_fma_f16_program():
     ])
 
 
-def valu_div_scale_fmas_program():
+def valu_div_fmas_program():
     return with_constants([
         "v_mov_b32_e32 v19, 2.0",
         "v_mov_b32_e32 v20, 4.0",
-        "v_div_scale_f32 v21, vcc_lo, v19, v20, v19",
+        "v_mov_b32_e32 v21, v19",
+        "v_cmp_lt_f32 vcc_lo, 1.0, 0",
         "v_div_fmas_f32 v12, v21, 0.5, 1.0",
         "v_div_fmas_f32 v13, v21, 0.5, 1.0 clamp",
         "v_cmp_lt_f32 vcc_lo, 0, 1.0",
@@ -4891,9 +4892,23 @@ def check_controls(directory):
     assert "widen16(" in fma16_source
     assert "saturate(" in fma16_source
 
-    div_source = translate(valu_div_scale_fmas_program())
+    div_source = translate(valu_div_fmas_program())
     assert "asfloat(0x4f800000u)" in div_source
-    assert "asfloat(0x0c800000u)" in div_source
+    for opcode in ("v_div_scale_f32", "v_div_scale_f32_e64"):
+        for denominator, numerator in (("1.0", "0x71800000"), ("0", "1.0"),
+                                       ("0x00800000", "1.0"), ("1.0", "1.0")):
+            program = uncompressed_export([
+                f"v_mov_b32_e32 v19, {denominator}",
+                f"v_mov_b32_e32 v20, {numerator}",
+                f"{opcode} v12, vcc_lo, v19, v19, v20",
+                "v_cndmask_b32_e64 v13, 0, 1.0, vcc_lo",
+            ])
+            try:
+                translate(program)
+            except ValueError as error:
+                assert "Unverified v_div_scale_f32" in str(error), error
+            else:
+                raise AssertionError("Unverified division prescaling was accepted")
 
     for bad in (
         "v_fma_f16 v22, v19, v20, v21 clamp clamp",

@@ -2992,3 +2992,19 @@ readback on RTX 4060 Laptop and WARP sampled 0.25 and 0.75 and compared them to
 0.5, yielding 0 and 1. Reversing the ordinary wrap/clamp descriptors exchanged
 only the sampled values. Reversing the comparison descriptors exchanged only
 the two comparison results.
+
+## Unverified division prescaling
+
+`pixel_aot` rejects `v_div_scale_f32` and its explicit `_e64` spelling. The
+instruction remains recognized by the scanner, but is not reported as a
+supported lowering. A denominator-only threshold cannot reproduce its
+numerator-dependent result and VCC flag. For example, scaling denominator 1
+with numerator 2^100 takes the RDNA 2 opcode 365 exponent-gap branch, which
+scales that denominator by 2^64 and sets VCC. Returning the original denominator
+and a clear flag silently changes subsequent division instructions.
+
+The Python controls reject that synthetic program, zero and small-normal
+denominators and an ordinary 1/1 case for both spellings. `v_div_fmas_f32`
+controls obtain their flag from a comparison independently of the rejected
+pre-scale operation. A future pre-scale implementation needs the full
+numerator/denominator cases and independent result and flag readback.
