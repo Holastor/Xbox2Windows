@@ -1732,6 +1732,26 @@ class TestRdna2Scanner(unittest.TestCase):
         self.assertTrue(is_instruction_supported("s_lshl4_add_u32 s1, s2, s3"))
         self.assertTrue(is_instruction_supported("s_bfm_b32 s1, s2, s3"))
         self.assertTrue(is_instruction_supported("s_bfm_b32 s1, 4, 8"))
+        for line in (
+            "v_alignbit_b32 v1, v2, v3, v4",
+            "v_alignbit_b32_e64 v1, v2, v3, 4",
+            "v_alignbit_b32 v1, s2, v3, 31",
+            "v_alignbyte_b32 v1, v2, v3, v4",
+            "v_alignbyte_b32_e64 v1, s2, v3, 2",
+            "v_alignbyte_b32 v1, v2, s3, 0",
+        ):
+            self.assertTrue(is_instruction_supported(line), line)
+        for line in (
+            "v_alignbit_b32_e32 v1, v2, v3, 4",
+            "v_alignbyte_b32_e32 v1, v2, v3, 2",
+            "v_alignbit_b32 v1, v2, v3",
+            "v_alignbyte_b32 v1, v2, v3",
+            "v_alignbit_b32 v1, v2, v3, 4, 5",
+            "v_alignbyte_b32 v1, v2, v3, 1, 2",
+        ):
+            self.assertFalse(is_instruction_supported(line), line)
+        for opcode in ("v_alignbit_b32", "v_alignbyte_b32"):
+            self.assertTrue(is_opcode_recognized(opcode), opcode)
         for unsupported in ("v_cvt_f32_i32 v1, v2",
                             "v_cvt_f32_i32_e32 v1, v2 clamp",
                             "v_cvt_f32_u32_e64 v1, -v2",

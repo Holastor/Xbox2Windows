@@ -35,6 +35,9 @@ VOP2_INT_OPS = (
     "v_and_b32_e32", "v_or_b32_e32", "v_xor_b32_e32",
     "v_add_nc_u32_e32", "v_sub_nc_u32_e32", "v_subrev_nc_u32_e32",
 )
+VOP3_ALIGN_OPS = (
+    "v_alignbit_b32", "v_alignbyte_b32",
+)
 # The 32-bit no-carry forms of nc_integer_group(1..3), as ACCEPTED records them (first word of the line).
 NC_INT_OPS = (
     "v_add_nc_u32_e32", "v_sub_nc_u32_e32", "v_subrev_nc_u32_e32",
@@ -3878,6 +3881,20 @@ def vop2_integer_group() -> list[str]:
     ])
 
 
+def align_integer_group() -> list[str]:
+    return with_constants([
+        "v_mov_b32_e32 v18, s45",
+        "v_alignbit_b32 v12, s44, v18, 4",
+        "v_alignbit_b32 v13, s44, v18, 0",
+        "v_alignbit_b32 v14, s44, v18, 31",
+        "v_alignbit_b32 v15, s44, v18, s46",
+        "v_alignbyte_b32 v12, s44, v18, 1",
+        "v_alignbyte_b32 v13, s44, v18, 0",
+        "v_alignbyte_b32 v14, s44, v18, 3",
+        "v_alignbyte_b32 v15, s44, v18, s46",
+    ])
+
+
 # Bodies for uncompressed_export(): s44 = A and s45 = B from the constants, v18 = B, and each channel v12..v15
 # holds its own result. Group 3 uses inline constants and register-first operands.
 NC_INT_BODIES = {
@@ -4318,6 +4335,32 @@ def check_controls(directory):
         "v_and_b32_e32 v12, s44, v106",
     ):
         must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", bad_vop2]))
+    align_source = translate(align_integer_group())
+    assert set(VOP3_ALIGN_OPS) <= ACCEPTED
+    for expected in (
+        "((4u & 31u) == 0u ? asuint(alu20) : ((asuint(alu20) >> (4u & 31u)) | (asuint(params[0].w) << (32u - (4u & 31u)))))",
+        "((0u & 31u) == 0u ? asuint(alu20) : ((asuint(alu20) >> (0u & 31u)) | (asuint(params[0].w) << (32u - (0u & 31u)))))",
+        "((31u & 31u) == 0u ? asuint(alu20) : ((asuint(alu20) >> (31u & 31u)) | (asuint(params[0].w) << (32u - (31u & 31u)))))",
+        "((asuint(params[1].y) & 31u) == 0u ? asuint(alu20) : ((asuint(alu20) >> (asuint(params[1].y) & 31u)) | (asuint(params[0].w) << (32u - (asuint(params[1].y) & 31u)))))",
+        "((1u & 3u) == 0u ? asuint(alu20) : ((asuint(alu20) >> ((1u & 3u) * 8u)) | (asuint(params[0].w) << (32u - ((1u & 3u) * 8u)))))",
+        "((0u & 3u) == 0u ? asuint(alu20) : ((asuint(alu20) >> ((0u & 3u) * 8u)) | (asuint(params[0].w) << (32u - ((0u & 3u) * 8u)))))",
+        "((3u & 3u) == 0u ? asuint(alu20) : ((asuint(alu20) >> ((3u & 3u) * 8u)) | (asuint(params[0].w) << (32u - ((3u & 3u) * 8u)))))",
+        "((asuint(params[1].y) & 3u) == 0u ? asuint(alu20) : ((asuint(alu20) >> ((asuint(params[1].y) & 3u) * 8u)) | (asuint(params[0].w) << (32u - ((asuint(params[1].y) & 3u) * 8u)))))",
+    ):
+        assert expected in align_source, expected
+    for bad_align in (
+        "v_alignbit_b32 v12, s44, v18",
+        "v_alignbit_b32 v12, s44, v18, 4, 5",
+        "v_alignbyte_b32 v12, s44, v18",
+        "v_alignbyte_b32 v12, s44, v18, 1, 2",
+        "v_alignbit_b32 v256, s44, v18, 4",
+        "v_alignbyte_b32 v256, s44, v18, 1",
+        "v_alignbit_b32 v12, abs(s44), v18, 4",
+        "v_alignbyte_b32 v12, s44, -v18, 1",
+        "v_alignbit_b32 v12, s44, v18, 4 clamp",
+        "v_alignbyte_b32 v12, s44, v18, 1 clamp",
+    ):
+        must_reject(translate, with_constants(["v_mov_b32_e32 v18, s45", bad_align]))
     check_nc_integer_lowering()
     lshl_add_source = translate(sop2_lshl_add_group())
     assert set(SOP2_LSHL_ADD_OPS) <= ACCEPTED
