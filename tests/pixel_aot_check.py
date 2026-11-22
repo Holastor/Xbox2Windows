@@ -1978,6 +1978,35 @@ def check_scalar_select64_draw(directory, compiler, renderer, backend):
     run_pixel_batch(renderer, backend, shader, [(case, "mismatch") for case in cases])
 
 
+def valu_fma_f16_program():
+    return with_constants([
+        "v_mov_b32_e32 v19, 0x3c00",
+        "v_mov_b32_e32 v20, 0x40003800",
+        "v_mov_b32_e32 v21, 0x3800",
+        "v_mov_b32_e32 v22, 0x44000000",
+        "v_fma_f16 v22, v19, v20, v21 op_sel:[0,0,0]",
+        "v_fma_f16 v23, v19, v20, -v21 op_sel:[0,1,0] clamp",
+        "v_fma_f16 v24, |v19|, 0.5, 0 op_sel:[0,0,0]",
+        "v_cvt_f32_f16_e32 v12, v22",
+        "v_fma_mix_f32 v13, v22, 1.0, 0 op_sel:[1,0,0] op_sel_hi:[1,0,0]",
+        "v_cvt_f32_f16_e32 v14, v23",
+        "v_cvt_f32_f16_e32 v15, v24",
+    ])
+
+
+def valu_div_scale_fmas_program():
+    return with_constants([
+        "v_mov_b32_e32 v19, 2.0",
+        "v_mov_b32_e32 v20, 4.0",
+        "v_div_scale_f32 v21, vcc_lo, v19, v20, v19",
+        "v_div_fmas_f32 v12, v21, 0.5, 1.0",
+        "v_div_fmas_f32 v13, v21, 0.5, 1.0 clamp",
+        "v_cmp_lt_f32 vcc_lo, 0, 1.0",
+        "v_div_fmas_f32 v14, 1.0, 2.0, 3.0",
+        "v_mov_b32_e32 v15, 0",
+    ])
+
+
 SCALAR64_SETS = (
     # (a_lo, a_hi, b_lo, b_hi, sh_lo, sh_hi, bfm_w, bfm_off, bfe_src, bfe_ctrl_a, bfe_ctrl_b, alt)
     (0x89abcdef, 0x91234567, 0x55aa55aa, 0x7fffffff, 5, 37, 12, 28, 0x9a345f50, 0x00080004, 0x00100018, 0x55aa55aa),
@@ -4855,6 +4884,42 @@ def check_controls(directory):
     must_reject(translate, with_constants(["v_madmk_f32_e64 v12, s44, 0x3e800000, v13"]))
     must_reject(translate, with_constants(["v_madak_f32_dpp v12, v13, v14, 0x3e800000 quad_perm:[0,1,2,3] row_mask:0xf bank_mask:0xf"]))
     must_reject(translate, with_constants(["v_madmk_f32_sdwa v12, v13, 0x3e800000, v14 dst_sel:DWORD dst_unused:UNUSED_PAD src0_sel:DWORD src1_sel:DWORD"]))
+
+    # 3-operand vector float math: v_fma_f16, v_div_scale_f32, v_div_fmas_f32
+    fma16_source = translate(valu_fma_f16_program())
+    assert "pack16_rne(" in fma16_source
+    assert "widen16(" in fma16_source
+    assert "saturate(" in fma16_source
+
+    div_source = translate(valu_div_scale_fmas_program())
+    assert "asfloat(0x4f800000u)" in div_source
+    assert "asfloat(0x0c800000u)" in div_source
+
+    for bad in (
+        "v_fma_f16 v22, v19, v20, v21 clamp clamp",
+        "v_fma_f16 v22, v19, v20, v21 op_sel:[1,0,0] op_sel:[0,1,0]",
+        "v_fma_f16 v22, v19, v20, v21 op_sel:[0,0,0,1]",
+        "v_fma_f16 v22, v19, v20, v21 omod:2",
+        "v_fma_f16 v22, v19, v20",
+        "v_fma_f16 v22, v19, v20, v21, v22",
+        "v_fma_f16 s22, v19, v20, v21",
+        "v_fma_f16 v256, v19, v20, v21",
+        "v_fma_f16 v22, v256, v20, v21",
+    ):
+        must_reject(translate, with_constants([bad]))
+
+    for bad in (
+        "v_div_scale_f32 v21, vcc_lo, v19, v20",
+        "v_div_scale_f32 s21, vcc_lo, v19, v20, v19",
+        "v_div_scale_f32 v21, v22, v19, v20, v19",
+        "v_div_fmas_f32 v12, v19, v20, v21",
+        "v_div_fmas_f32 v12, v19, v20, v21 clamp clamp",
+        "v_div_fmas_f32 v12, v19, v20, v21 op_sel:[1,0,0]",
+        "v_div_fmas_f32 v12, v19, v20",
+        "v_div_fmas_f32 s12, v19, v20, v21",
+        "v_div_fmas_f32 v256, v19, v20, v21",
+    ):
+        must_reject(translate, with_constants([bad]))
 
     # 64-bit scalar ALU and BFE controls.
     for op in SCALAR_BFE64_OPS:

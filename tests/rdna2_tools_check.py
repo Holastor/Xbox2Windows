@@ -1873,6 +1873,36 @@ class TestRdna2Scanner(unittest.TestCase):
         with self.assertRaises(ValueError):
             lower(with_v_nop_after_exp, 20, 24, [1, 2, 3, 4])
 
+    def test_valu_3operand_float_math_scanner(self):
+        """Test scanning v_fma_f16, v_div_scale_f32, and v_div_fmas_f32 in scan_unsupported_shaders."""
+        valid_insns = [
+            "v_fma_f16 v0, v1, v2, v3",
+            "v_fma_f16_e64 v0, v1, v2, v3",
+            "v_fma_f16 v0, v1, v2, v3 clamp",
+            "v_fma_f16 v0, v1, v2, v3 op_sel:[1,0,1]",
+            "v_fma_f16 v0, v1, v2, v3 op_sel:[1,0,1] clamp",
+            "v_fma_f16 v0, v1, v2, v3 clamp op_sel:[1,0,1]",
+            "v_fma_f16 v0, -v1, |v2|, 0.5 op_sel:[0,1,0]",
+            "v_div_scale_f32 v0, vcc_lo, v1, v2, v3",
+            "v_div_scale_f32_e64 v0, vcc, v1, v2, v3",
+            "v_div_scale_f32 v0, s52, v1, v2, v3",
+            "v_div_fmas_f32 v0, v1, v2, v3",
+            "v_div_fmas_f32_e64 v0, v1, v2, v3",
+            "v_div_fmas_f32 v0, v1, v2, v3 clamp",
+        ]
+        for insn in valid_insns:
+            self.assertTrue(is_instruction_supported(insn), f"Expected supported: {insn}")
+
+        invalid_insns = [
+            "v_fma_f16 v0, v1, v2",
+            "v_fma_f16 v0, v1, v2, v3 omod:2",
+            "v_div_scale_f32 v0, v1, v2, v3",
+            "v_div_fmas_f32 v0, v1, v2",
+            "v_div_fmas_f32 v0, v1, v2, v3 omod:2",
+        ]
+        for insn in invalid_insns:
+            self.assertFalse(is_instruction_supported(insn), f"Expected unsupported: {insn}")
+
 
 if __name__ == "__main__":
     unittest.main()

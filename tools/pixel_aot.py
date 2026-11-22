@@ -1188,6 +1188,49 @@ def parse_fma_mix(rest):
     if any(hi and not f16 for f16, hi in zip(op_sel, op_sel_hi)):
         raise ValueError("High-half selection requires an f16 operand")
     return operands, op_sel, op_sel_hi, clamp
+
+
+def parse_fma_f16(rest):
+    parts_ = rest.split(", ")
+    if len(parts_) != 3:
+        raise ValueError("Invalid f16 FMA operand count")
+    last_op, _, mod_text = parts_[-1].partition(" ")
+    operands = [*parts_[:-1], last_op]
+    opts = {}
+    clamp = False
+    for mod in mod_text.split():
+        if mod == "clamp":
+            if clamp:
+                raise ValueError("Duplicate clamp modifier")
+            clamp = True
+        elif m := re.fullmatch(r"op_sel:\[([01],[01],[01](?:,[01])?)\]", mod):
+            if "op_sel" in opts:
+                raise ValueError(f"Duplicate modifier {mod}")
+            bits = [int(b) for b in m.group(1).split(",")]
+            if len(bits) == 4 and bits[3] != 0:
+                raise ValueError("Destination op_sel must be 0")
+            opts["op_sel"] = bits[:3]
+        else:
+            raise ValueError(f"Unsupported f16 FMA modifier {mod}")
+    op_sel = opts.get("op_sel", [0, 0, 0])
+    return operands, op_sel, clamp
+
+
+def parse_div_fmas(rest):
+    parts_ = rest.split(", ")
+    if len(parts_) != 3:
+        raise ValueError("Invalid div_fmas operand count")
+    last_op, _, mod_text = parts_[-1].partition(" ")
+    operands = [*parts_[:-1], last_op]
+    clamp = False
+    for mod in mod_text.split():
+        if mod == "clamp":
+            if clamp:
+                raise ValueError("Duplicate clamp modifier")
+            clamp = True
+        else:
+            raise ValueError(f"Unsupported div_fmas modifier {mod}")
+    return operands, clamp
 def dot_word(token, scalar, vector, pending, sample_dest, *, allow_f16=False):
     """Return a 32-bit uint HLSL expression for one VOP3P dot-product source operand."""
     if allow_f16 and token in INLINE_F16:
@@ -2286,6 +2329,63 @@ def lower(instructions, texture_sgpr, interp_sgpr, sampler, constant_descriptor=
                     packed = f"(mix{i}_p & 0x0000ffffu) | (pack16_rne(mix{i}) << 16)"
                 vector[dst] = f"alu{i}"
                 lines.append(f"    precise float alu{i} = asfloat({packed});")
+        elif m := match(r"v_fma_f16(?:_e64)? (v\d+), (.+)"):
+            dst, rest = m.groups()
+            if mask != "entry" or not 0 <= int(dst[1:]) <= 255:
+                raise ValueError("Invalid f16 FMA")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            operands, op_sel, clamp = parse_fma_f16(rest)
+            args = [
+                fma_mix_operand(t, True, bool(hi), scalar, vector, pending, sample_dest)
+                for t, hi in zip(operands, op_sel)
+            ]
+            expr = f"mad({args[0]}, {args[1]}, {args[2]})"
+            if clamp:
+                expr = f"saturate({expr})"
+            if dst in vector:
+                _, prev_word = fma_mix_reg(dst, scalar, vector, pending, sample_dest)
+            else:
+                prev_word = "0u"
+            helpers.add("pack16_rne")
+            lines.append(f"    precise float fma{i} = {expr};")
+            lines.append(f"    uint fma{i}_p = {prev_word};")
+            packed = f"(fma{i}_p & 0xffff0000u) | pack16_rne(fma{i})"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = asfloat({packed});")
+        elif m := match(rf"v_div_scale_f32(?:_e64)? (v\d+), {LANE_MASK}, ([^,]+), ([^,]+), ([^,]+)"):
+            vdst, sdst, src0, src1, src2 = m.groups()
+            regs = lane_mask(sdst)
+            if mask != "entry" or pending.intersection(regs) or not 0 <= int(vdst[1:]) <= 255:
+                raise ValueError("Invalid div_scale operation")
+            if vdst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            s0 = fp_operand(src0, scalar, vector, pending, sample_dest)
+            s1 = fp_operand(src1, scalar, vector, pending, sample_dest)
+            s2 = fp_operand(src2, scalar, vector, pending, sample_dest)
+            for j, reg in enumerate(regs):
+                scalar[reg] = ("condition", f"cmp{i}", j, len(regs))
+            lines.append(f"    bool cmp{i} = (abs({s1}) < asfloat(0x0c800000u) || abs({s1}) > asfloat(0x70800000u));")
+            vector[vdst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = cmp{i} ? (asfloat(0x4f800000u) * {s0}) : {s0};")
+        elif m := match(r"v_div_fmas_f32(?:_e64)? (v\d+), (.+)"):
+            dst, rest = m.groups()
+            if mask != "entry" or not 0 <= int(dst[1:]) <= 255:
+                raise ValueError("Invalid div_fmas operation")
+            if dst in sample_dest:
+                raise ValueError("Write overlaps an outstanding sample")
+            tokens, clamp = parse_div_fmas(rest)
+            condition = scalar.get("vcc")
+            if condition is None:
+                condition = scalar.get("vcc_lo")
+            if condition is None or not isinstance(condition, tuple) or condition[0] != "condition":
+                raise ValueError("Divide FMA requires a tracked VCC condition")
+            values = [fp_operand(t, scalar, vector, pending, sample_dest) for t in tokens]
+            expr = f"({condition[1]} ? (asfloat(0x4f800000u) * mad({values[0]}, {values[1]}, {values[2]})) : mad({values[0]}, {values[1]}, {values[2]}))"
+            if clamp:
+                expr = f"saturate({expr})"
+            vector[dst] = f"alu{i}"
+            lines.append(f"    precise float alu{i} = {expr};")
         elif m := match(r"(v_dot2_f32_f16|v_dot2_i32_i16|v_dot2_u32_u16|v_dot4_i32_i8|v_dot4_u32_u8|v_dot8_i32_i4|v_dot8_u32_u4) (v\d+), (.+)"):
             op, dst, rest = m.groups()
             if mask != "entry" or not 0 <= int(dst[1:]) <= 255:
