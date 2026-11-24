@@ -640,10 +640,11 @@ void upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         written = found->second;
     ReleaseSRWLockShared(&written_lock);
     const auto* original = resource_info(resource);
-    const bool tiled_chain = original && x2w_startup::bc64::supports(original->console);
+    const bool is_gfx10_tiled = original && x2w_startup::Gfx10Texture::supports(original->console) &&
+                                (x2w_startup::Gfx10Texture::is_tiled(original->console) || resource->own().tiled_address_srv);
     const bool tiled_address = resource->own().tiled_address_srv;
-    const bool tiled_bc7 = !tiled_chain && !tiled_address && written.bc7_width != 0;
-    const bool tiled = tiled_bc7 || tiled_address || tiled_chain;
+    const bool tiled_bc7 = !is_gfx10_tiled && !tiled_address && written.bc7_width != 0;
+    const bool tiled = tiled_bc7 || tiled_address || is_gfx10_tiled;
     const auto generation = written.generation;
     const x2w_startup::Bc16Surface surface(tiled_bc7 ? written.bc7_width : static_cast<UINT>(desc.Width),
                                          tiled_bc7 ? written.bc7_height : desc.Height);
@@ -653,12 +654,13 @@ void upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
             desc.Format != DXGI_FORMAT_BC7_UNORM || desc.Width != surface.columns * surface.block_texels ||
             desc.Height != surface.rows * surface.block_texels) return;
     }
-    if (tiled && !tiled_chain && (plan.count != 1 || plan.rows[0] != surface.rows ||
+    if (tiled && !is_gfx10_tiled && (plan.count != 1 || plan.rows[0] != surface.rows ||
                   plan.row_bytes[0] != u64{surface.columns} * surface.block_bytes)) return;
-    const u64 total = tiled_chain ? x2w_startup::bc64::Chain(original->console).bytes() : tiled ? surface.size() : stride * (slices - 1) + slice_total;
+    const x2w_startup::Gfx10Texture gfx10_tex = is_gfx10_tiled ? x2w_startup::Gfx10Texture(original->console) : x2w_startup::Gfx10Texture{};
+    const u64 total = is_gfx10_tiled ? gfx10_tex.bytes() : tiled ? surface.size() : stride * (slices - 1) + slice_total;
     const bool announced = state.generation != generation;
     const UINT elapsed = static_cast<UINT>(frame_number) - static_cast<UINT>(state.checked_frame);
-    const bool recheck = (tiled_address || tiled_chain) ? elapsed != 0
+    const bool recheck = (tiled_address || is_gfx10_tiled) ? elapsed != 0
         : x2w_startup::recheck_cpu_texture(desc, total, elapsed);
     if (state.done && !announced && !recheck) return;
     if (readable_window(reinterpret_cast<u64>(memory), static_cast<std::size_t>(total)) < total) {
@@ -674,8 +676,7 @@ void upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         return;
     }
     require_state(self, texture, D3D12_RESOURCE_STATE_COPY_DEST);
-    if (tiled_chain) {
-        const x2w_startup::bc64::Chain chain(original->console);
+    if (is_gfx10_tiled) {
         for (UINT slice = 0; slice < slices; ++slice) {
             for (UINT i = 0; i < mips; ++i) {
                 const u64 bytes = plan.bytes(i);
@@ -686,7 +687,7 @@ void upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
                     return;
                 }
                 std::memset(rows, 0, static_cast<std::size_t>(bytes));
-                chain.copy<false>(i, slice, rows, memory, plan.placed[i].Footprint.RowPitch);
+                gfx10_tex.copy_subresource<false>(i, slice, rows, memory, plan.placed[i].Footprint.RowPitch);
                 plan.upload(list, texture, upload_ring, mips, slices, slice, i, offset);
             }
         }

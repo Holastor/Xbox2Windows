@@ -21,6 +21,7 @@
 #include "startup_stubs/translated_sampler_bindings.h"
 #include "startup_stubs/bc7_4k_s.h"
 #include "startup_stubs/bc64_chain.h"
+#include "startup_stubs/gfx10_texture.h"
 #include "startup_stubs/derived_blend.h"
 #include "startup_stubs/placement_publish.h"
 #include "startup_stubs/placed_build.h"

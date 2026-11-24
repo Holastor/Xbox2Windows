@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include "startup_stubs/bc64_chain.h"
+#include "startup_stubs/gfx10_texture.h"
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -95,6 +96,10 @@ void notify_texture_write(void* base, u64 bytes)
     const auto notify = d3d ? reinterpret_cast<Notify>(GetProcAddress(d3d, "x2w_d3d12_texture_written")) : nullptr;
     if (notify) notify(base, bytes);
 }
+
+void write_bc7_4k_s_layout(const D3D12_RESOURCE_DESC& desc, unsigned char* layout);
+HRESULT copy_bc7_4k_s(const D3D12_RESOURCE_DESC& desc, unsigned char* dest, const unsigned char* source,
+                      UINT row_pitch, UINT slice_pitch);
 
 #include "startup_stubs/xg_bc64.inl"
 
@@ -370,7 +375,7 @@ extern "C" __declspec(noinline) long XGCreateTextureComputer(u64 rcx, u64 rdx, u
         slots[10] = reinterpret_cast<void*>(&bc64_tiling);
         return slots;
     }();
-    auto* computer = new Computer{bc64::supports(desc) ? bc_table.data() : table.data(), desc, 1, use_bc7_4k_s_layout(desc)};
+    auto* computer = new Computer{x2w_startup::Gfx10Texture::supports(desc) ? bc_table.data() : table.data(), desc, 1, use_bc7_4k_s_layout(desc)};
     *reinterpret_cast<Computer**>(rdx) = computer;
     static LONG calls;
     if (InterlockedIncrement(&calls) <= 3)

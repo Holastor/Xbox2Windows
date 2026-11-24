@@ -135,7 +135,9 @@ std::unordered_multimap<u64, Wrapper*> tiled_srv_addresses;
 
 Wrapper* publish_tiled_texture(Wrapper* device, u64 address, const D3D12_RESOURCE_DESC& desc)
 {
-    const auto bytes = x2w_startup::bc64::supports(desc) ? x2w_startup::bc64::Chain(desc).bytes() : x2w_startup::Bc16Surface(desc).size();
+    const auto bytes = (x2w_startup::Gfx10Texture::supports(desc) && x2w_startup::Gfx10Texture::is_tiled(desc))
+        ? x2w_startup::Gfx10Texture(desc).bytes()
+        : x2w_startup::bc64::supports(desc) ? x2w_startup::bc64::Chain(desc).bytes() : x2w_startup::Bc16Surface(desc).size();
     // The transient upload ring accepts individual copies up to 64 MiB.
     if (bytes > (64ull << 20) || !x2w_local::readable(reinterpret_cast<const void*>(address), bytes)) return nullptr;
     std::lock_guard lock(tiled_srv_mutex);
@@ -230,8 +232,10 @@ void __stdcall device_memory_srv(Wrapper* self, const D3D12_RESOURCE_DESC* resou
         view_slot<18, 2>(self, reinterpret_cast<u64>(buffer), reinterpret_cast<u64>(&adjusted), destination, 0);
         return;
     }
-    Wrapper* texture = (tiled_bc_srv(*resource) || x2w_startup::bc64::supports(*resource)) ? publish_tiled_texture(self, input->address, *resource)
-                                              : existing_memory_texture(input->address, *resource);
+    Wrapper* texture = (tiled_bc_srv(*resource) || x2w_startup::bc64::supports(*resource) ||
+                        (x2w_startup::Gfx10Texture::supports(*resource) && x2w_startup::Gfx10Texture::is_tiled(*resource)))
+                       ? publish_tiled_texture(self, input->address, *resource)
+                       : existing_memory_texture(input->address, *resource);
     if (!texture) {
         if (first_calls(refused, 8))
             log_refused_memory_srv("unavailable texture at the supplied base and layout", "texture_unavailable", resource, input, destination);
