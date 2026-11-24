@@ -68,6 +68,73 @@ struct QueueWork {
     std::deque<Entry> waiting, submitted;
 };
 
+struct CachedStream {
+    u64 source = 0;
+    u64 base_offset = 0;
+    unsigned compressed_size = 0;
+    std::vector<unsigned char> data;
+};
+
+struct StreamCache {
+    std::mutex mutex;
+    static constexpr std::size_t max_entries = 16;
+    std::deque<CachedStream> entries;
+
+    void put(u64 source, u64 base_offset, unsigned compressed_size, std::vector<unsigned char> data) {
+        const std::lock_guard guard(mutex);
+        for (auto it = entries.begin(); it != entries.end(); ++it) {
+            if (it->source == source && it->base_offset == base_offset && it->compressed_size == compressed_size) {
+                entries.erase(it);
+                break;
+            }
+        }
+        if (entries.size() >= max_entries) {
+            entries.pop_front();
+        }
+        entries.push_back({source, base_offset, compressed_size, std::move(data)});
+    }
+
+    bool get_slice(u64 source, u64 offset, unsigned compressed_size, unsigned need_bytes,
+                   std::vector<unsigned char>& out_slice) {
+        const std::lock_guard guard(mutex);
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+            if (it->source == source && it->compressed_size == compressed_size) {
+                if (offset >= it->base_offset) {
+                    const u64 delta = offset - it->base_offset;
+                    if (delta + need_bytes <= it->data.size()) {
+                        out_slice.assign(it->data.begin() + delta, it->data.begin() + delta + need_bytes);
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+};
+static StreamCache stream_cache;
+
+bool has_following_chunk(Object* self, u64 source, u64 offset, unsigned source_size, unsigned destination_size) {
+    if (!self || !self->work) return false;
+    QueueWork& work = *self->work;
+    const std::lock_guard guard(work.mutex);
+    auto check = [&](const Entry& e) {
+        if (e.type != Entry::request) return false;
+        const u64 e_options = *reinterpret_cast<const u64*>(e.bytes);
+        if (!(e_options & 1)) return false;
+        const u64 e_source = *reinterpret_cast<const u64*>(e.bytes + 0x20);
+        const u64 e_offset = *reinterpret_cast<const u64*>(e.bytes + 0x28);
+        const unsigned e_source_size = *reinterpret_cast<const unsigned*>(e.bytes + 0x30);
+        return e_source == source && e_source_size == source_size && e_offset == offset + destination_size;
+    };
+    for (const auto& e : work.submitted) {
+        if (check(e)) return true;
+    }
+    for (const auto& e : work.waiting) {
+        if (check(e)) return true;
+    }
+    return false;
+}
+
 void log(const char* format, ...)
 {
     char line[1024];
@@ -283,42 +350,58 @@ void execute_request(Object* self, const unsigned char* request, const ULONG_PTR
     if (input) {
         data = input;
         if (zlib) {
-            // With BCPack after it, the inflated size is not given; the destination size bounds it.
-            // DirectStorage provides UncompressedSize at request + 0x38. When destination is smaller
-            // than the stream (e.g. 64 KiB tile/page target), allocate for the full uncompressed stream
-            // so single-pass inflate succeeds and verifies Adler32, then check capacity before writing.
-            const unsigned uncompressed_size = *reinterpret_cast<const unsigned*>(request + 0x38);
-            std::size_t target_size = (uncompressed_size > destination_size) ? uncompressed_size : destination_size;
-            if (bcpack) target_size = target_size * 2 + 0x10000;
-            output.resize(target_size);
-            std::size_t produced = 0;
-            bool ok = x2w_inflate::inflate_zlib(input, source_size, output.data(), output.size(), &produced);
-            if (!ok && output.size() < 0x80000) {
-                // If destination_size was smaller than the uncompressed stream and uncompressed_size was unset,
-                // expand up to 512 KiB to accommodate larger chunks.
-                std::size_t big_size = std::size_t{destination_size} * 8 + 0x40000;
-                if (big_size < 0x80000) big_size = 0x80000;
-                std::vector<unsigned char> big(big_size);
-                std::size_t big_produced = 0;
-                if (x2w_inflate::inflate_zlib(input, source_size, big.data(), big.size(), &big_produced)) {
-                    output = std::move(big);
-                    produced = big_produced;
-                    ok = true;
-                }
-            }
-            if (!ok) {
-                outcome = "zlib failed";
-                data = nullptr;
-                static LONG diagnosed;
-                if (InterlockedIncrement(&diagnosed) <= 12) {
-                    log("x2w-dstorage zlib failure: header %02x %02x %02x %02x (dest 0x%x, source 0x%x)",
-                        input[0], input[1], input[2], input[3], destination_size, source_size);
-                }
-            } else {
-                decode_length = produced;
-                output.resize(produced);
+            // First check if this request is a piece of an already-inflated chunked stream (Refs #1136)
+            if (stream_cache.get_slice(source, offset, source_size, destination_size, output)) {
+                decode_length = destination_size;
                 data = output.data();
-                outcome = produced == destination_size || bcpack ? "inflated" : "inflated (larger/short)";
+                outcome = "inflated (slice from stream cache)";
+            } else {
+                // With BCPack after it, the inflated size is not given; the destination size bounds it.
+                // DirectStorage provides UncompressedSize at request + 0x38. When destination is smaller
+                // than the stream (e.g. 64 KiB tile/page target), allocate for the full uncompressed stream
+                // so single-pass inflate succeeds and verifies Adler32, then check capacity before writing.
+                const unsigned uncompressed_size = *reinterpret_cast<const unsigned*>(request + 0x38);
+                std::size_t target_size = (uncompressed_size > destination_size) ? uncompressed_size : destination_size;
+                if (bcpack) target_size = target_size * 2 + 0x10000;
+                output.resize(target_size);
+                std::size_t produced = 0;
+                bool ok = x2w_inflate::inflate_zlib(input, source_size, output.data(), output.size(), &produced);
+                if (!ok && output.size() < 0x80000) {
+                    // If destination_size was smaller than the uncompressed stream and uncompressed_size was unset,
+                    // expand up to 512 KiB to accommodate larger chunks.
+                    std::size_t big_size = std::size_t{destination_size} * 8 + 0x40000;
+                    if (big_size < 0x80000) big_size = 0x80000;
+                    std::vector<unsigned char> big(big_size);
+                    std::size_t big_produced = 0;
+                    if (x2w_inflate::inflate_zlib(input, source_size, big.data(), big.size(), &big_produced)) {
+                        output = std::move(big);
+                        produced = big_produced;
+                        ok = true;
+                    }
+                }
+                if (!ok) {
+                    outcome = "zlib failed";
+                    data = nullptr;
+                    static LONG diagnosed;
+                    if (InterlockedIncrement(&diagnosed) <= 12) {
+                        log("x2w-dstorage zlib failure: header %02x %02x %02x %02x (dest 0x%x, source 0x%x)",
+                            input[0], input[1], input[2], input[3], destination_size, source_size);
+                    }
+                } else {
+                    output.resize(produced);
+                    // If the stream expanded beyond this request's destination and following chunks exist,
+                    // cache the uncompressed stream and serve slice 0 (Refs #1136).
+                    if (produced > destination_size && has_following_chunk(self, source, offset, source_size, destination_size)) {
+                        stream_cache.put(source, offset, source_size, output);
+                        decode_length = destination_size;
+                        data = output.data();
+                        outcome = "inflated (chunked stream piece 0)";
+                    } else {
+                        decode_length = produced;
+                        data = output.data();
+                        outcome = produced == destination_size || bcpack ? "inflated" : "inflated (larger/short)";
+                    }
+                }
             }
         }
         if (data && bcpack) {

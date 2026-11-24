@@ -197,6 +197,116 @@ bool dstorage_checks() {
             XMemFreePhysicalPages(2, pages);
         }
     }
+
+    // Test chunked streaming reads across 4 requests (Refs #1136)
+    {
+        const size_t total_chunks = 4;
+        const size_t chunk_dest_size = 64 * 1024;
+        const size_t total_plain_size = total_chunks * chunk_dest_size; // 256 KiB
+        std::vector<unsigned char> full_plain(total_plain_size);
+        for (size_t i = 0; i < total_plain_size; ++i) full_plain[i] = static_cast<unsigned char>((i % 239) ^ 0xa5);
+        const auto full_comp = make_stored_zlib(full_plain.data(), total_plain_size);
+
+        void* status_ptr = nullptr;
+        if (reinterpret_cast<CreateStatusArrayFn>(factory->vtable[5])(factory, static_cast<unsigned>(total_chunks), "ChunkedStatus", nullptr, &status_ptr) != 0 || !status_ptr)
+            return false;
+        auto* status = static_cast<Object*>(status_ptr);
+
+        void* queue_ptr = nullptr;
+        unsigned char desc[0x20] = {};
+        *reinterpret_cast<uint16_t*>(desc + 8) = 16;
+        if (reinterpret_cast<CreateQueueFn>(factory->vtable[10])(factory, desc, nullptr, &queue_ptr) != 0 || !queue_ptr)
+            return false;
+        auto* queue = static_cast<Object*>(queue_ptr);
+
+        std::vector<std::vector<unsigned char>> chunks(total_chunks, std::vector<unsigned char>(chunk_dest_size, 0));
+        for (size_t k = 0; k < total_chunks; ++k) {
+            unsigned char req[0x48] = {};
+            *reinterpret_cast<u64*>(req + 0x00) = 1 | 0x400000; // zlib | memory_source
+            *reinterpret_cast<void**>(req + 0x08) = chunks[k].data();
+            *reinterpret_cast<u64*>(req + 0x10) = 0;
+            *reinterpret_cast<unsigned*>(req + 0x18) = static_cast<unsigned>(chunk_dest_size);
+            *reinterpret_cast<const unsigned char**>(req + 0x20) = full_comp.data();
+            *reinterpret_cast<u64*>(req + 0x28) = k * chunk_dest_size; // offset stepped by destination size
+            *reinterpret_cast<unsigned*>(req + 0x30) = static_cast<unsigned>(full_comp.size());
+            *reinterpret_cast<unsigned*>(req + 0x38) = static_cast<unsigned>(total_plain_size);
+
+            reinterpret_cast<EnqueueRequestFn>(queue->vtable[3])(queue, req);
+            reinterpret_cast<EnqueueStatusFn>(queue->vtable[4])(queue, status, static_cast<unsigned>(k));
+        }
+        reinterpret_cast<SubmitFn>(queue->vtable[6])(queue);
+
+        for (int i = 0; i < 200; ++i) {
+            if (reinterpret_cast<IsCompleteFn>(status->vtable[3])(status, static_cast<unsigned>(total_chunks - 1))) break;
+            Sleep(10);
+        }
+        for (size_t k = 0; k < total_chunks; ++k) {
+            if (!reinterpret_cast<IsCompleteFn>(status->vtable[3])(status, static_cast<unsigned>(k))) return false;
+            long hr = reinterpret_cast<GetHResultFn>(status->vtable[4])(status, static_cast<unsigned>(k));
+            if (hr != 0) return false;
+            if (std::memcmp(chunks[k].data(), full_plain.data() + k * chunk_dest_size, chunk_dest_size) != 0) return false;
+        }
+    }
+
+    // Negative control: chunk request with out-of-bounds offset must fail and leave destination untouched
+    {
+        const size_t total_plain_size = 128 * 1024;
+        std::vector<unsigned char> test_plain(total_plain_size, 0x55);
+        const auto test_comp = make_stored_zlib(test_plain.data(), total_plain_size);
+
+        void* status_ptr = nullptr;
+        if (reinterpret_cast<CreateStatusArrayFn>(factory->vtable[5])(factory, 2, "ChunkNegStatus", nullptr, &status_ptr) != 0 || !status_ptr)
+            return false;
+        auto* status = static_cast<Object*>(status_ptr);
+
+        void* queue_ptr = nullptr;
+        unsigned char desc[0x20] = {};
+        *reinterpret_cast<uint16_t*>(desc + 8) = 16;
+        if (reinterpret_cast<CreateQueueFn>(factory->vtable[10])(factory, desc, nullptr, &queue_ptr) != 0 || !queue_ptr)
+            return false;
+        auto* queue = static_cast<Object*>(queue_ptr);
+
+        std::vector<unsigned char> dest0(64 * 1024, 0);
+        std::vector<unsigned char> dest1(64 * 1024, 0xEE); // sentinel
+
+        // Piece 0
+        unsigned char req0[0x48] = {};
+        *reinterpret_cast<u64*>(req0 + 0x00) = 1 | 0x400000;
+        *reinterpret_cast<void**>(req0 + 0x08) = dest0.data();
+        *reinterpret_cast<unsigned*>(req0 + 0x18) = 64 * 1024;
+        *reinterpret_cast<const unsigned char**>(req0 + 0x20) = test_comp.data();
+        *reinterpret_cast<u64*>(req0 + 0x28) = 0;
+        *reinterpret_cast<unsigned*>(req0 + 0x30) = static_cast<unsigned>(test_comp.size());
+        *reinterpret_cast<unsigned*>(req0 + 0x38) = static_cast<unsigned>(total_plain_size);
+
+        // Piece 1 with invalid offset (500 KiB > 128 KiB)
+        unsigned char req1[0x48] = {};
+        *reinterpret_cast<u64*>(req1 + 0x00) = 1 | 0x400000;
+        *reinterpret_cast<void**>(req1 + 0x08) = dest1.data();
+        *reinterpret_cast<unsigned*>(req1 + 0x18) = 64 * 1024;
+        *reinterpret_cast<const unsigned char**>(req1 + 0x20) = test_comp.data();
+        *reinterpret_cast<u64*>(req1 + 0x28) = 500 * 1024;
+        *reinterpret_cast<unsigned*>(req1 + 0x30) = static_cast<unsigned>(test_comp.size());
+        *reinterpret_cast<unsigned*>(req1 + 0x38) = static_cast<unsigned>(total_plain_size);
+
+        reinterpret_cast<EnqueueRequestFn>(queue->vtable[3])(queue, req0);
+        reinterpret_cast<EnqueueStatusFn>(queue->vtable[4])(queue, status, 0);
+        reinterpret_cast<EnqueueRequestFn>(queue->vtable[3])(queue, req1);
+        reinterpret_cast<EnqueueStatusFn>(queue->vtable[4])(queue, status, 1);
+        reinterpret_cast<SubmitFn>(queue->vtable[6])(queue);
+
+        for (int i = 0; i < 200; ++i) {
+            if (reinterpret_cast<IsCompleteFn>(status->vtable[3])(status, 1)) break;
+            Sleep(10);
+        }
+        if (!reinterpret_cast<IsCompleteFn>(status->vtable[3])(status, 1)) return false;
+        long hr1 = reinterpret_cast<GetHResultFn>(status->vtable[4])(status, 1);
+        if (hr1 == 0) return false;
+        for (unsigned char b : dest1) {
+            if (b != 0xEE) return false;
+        }
+    }
+
     return true;
 }
 
