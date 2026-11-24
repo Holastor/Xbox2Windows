@@ -275,14 +275,18 @@ void execute_request(Object* self, const unsigned char* request, const ULONG_PTR
         else
             outcome = "read failed";
     }
+    const unsigned char* data = nullptr;
+    std::size_t decode_length = source_size;
+    const std::size_t destination_capacity = destination_size;
+    bool written = false;
+
     if (input) {
-        const unsigned char* data = input;
-        std::size_t size = source_size;
+        data = input;
         if (zlib) {
             // With BCPack after it, the inflated size is not given; the destination size bounds it.
             // DirectStorage provides UncompressedSize at request + 0x38. When destination is smaller
             // than the stream (e.g. 64 KiB tile/page target), allocate for the full uncompressed stream
-            // so single-pass inflate succeeds and verifies Adler32, then bound destination writes to destination_size.
+            // so single-pass inflate succeeds and verifies Adler32, then check capacity before writing.
             const unsigned uncompressed_size = *reinterpret_cast<const unsigned*>(request + 0x38);
             std::size_t target_size = (uncompressed_size > destination_size) ? uncompressed_size : destination_size;
             if (bcpack) target_size = target_size * 2 + 0x10000;
@@ -311,11 +315,10 @@ void execute_request(Object* self, const unsigned char* request, const ULONG_PTR
                         input[0], input[1], input[2], input[3], destination_size, source_size);
                 }
             } else {
+                decode_length = produced;
                 output.resize(produced);
                 data = output.data();
-                size = produced;
                 outcome = produced == destination_size || bcpack ? "inflated" : "inflated (larger/short)";
-                InterlockedIncrement(&requests_compressed);
             }
         }
         if (data && bcpack) {
@@ -323,30 +326,66 @@ void execute_request(Object* self, const unsigned char* request, const ULONG_PTR
             // title's loading continues. Counted as bcpack_blank.
             output.assign(destination_size, 0);
             data = output.data();
-            size = destination_size;
+            decode_length = destination_size;
             outcome = "BCPack not decoded: zero-filled";
-            InterlockedIncrement(&requests_bcpack_blank);
         }
         if (data) {
-            if (size > destination_size) size = destination_size;
-            bool written = true;
+            // Track decode length and destination capacity as separate values (Refs #1144).
+            // A short destination or missing/insufficient page grant must fail the request
+            // and leave the destination memory completely unchanged.
+            if (decode_length > destination_capacity) {
+                outcome = "destination capacity exceeded";
+                data = nullptr;
+            } else if (page_destination) {
+                const ULONG_PTR needed_pages = (page_offset + decode_length + 0xFFFF) / 0x10000;
+                const ULONG_PTR granted_pages = (page_offset + destination_capacity + 0xFFFF) / 0x10000;
+                if (needed_pages > granted_pages) {
+                    outcome = "insufficient page grants";
+                    data = nullptr;
+                } else if (!tokens) {
+                    outcome = "missing page tokens";
+                    data = nullptr;
+                } else {
+                    for (ULONG_PTR i = 0; i < needed_pages; ++i) {
+                        if (!tokens[i]) {
+                            outcome = "missing page grant token";
+                            data = nullptr;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (data) {
+            written = true;
             if (page_destination) {
                 using WritePhysical = BOOL(WINAPI*)(const ULONG_PTR*, ULONG_PTR, SIZE_T, const void*, SIZE_T);
                 static const WritePhysical write_physical = [] {
                     const HMODULE xmem = GetModuleHandleW(L"xmem.dll");
                     return xmem ? reinterpret_cast<WritePhysical>(GetProcAddress(xmem, "x2w_xmem_write_physical")) : nullptr;
                 }();
-                const ULONG_PTR pages = (page_offset + size + 0xFFFF) / 0x10000;
-                written = write_physical && tokens && write_physical(tokens, pages, page_offset, data, size);
-                if (!written) outcome = "page destination write failed";
+                const ULONG_PTR pages = (page_offset + decode_length + 0xFFFF) / 0x10000;
+                written = write_physical && write_physical(tokens, pages, page_offset, data, decode_length);
+                if (!written) {
+                    outcome = "page destination write failed";
+                    data = nullptr;
+                }
             } else if (data != destination) {
-                std::memcpy(destination, data, size);
+                std::memcpy(destination, data, decode_length);
             }
-            if (written && !zlib && !bcpack) InterlockedIncrement(&requests_done);
+            if (written) {
+                if (bcpack) {
+                    InterlockedIncrement(&requests_bcpack_blank);
+                } else if (zlib) {
+                    InterlockedIncrement(&requests_compressed);
+                } else {
+                    InterlockedIncrement(&requests_done);
+                }
+            }
         }
     }
-    if (outcome[0] == 'r' || outcome[0] == 'z' || outcome[0] == 'u' || outcome[0] == 'p') InterlockedIncrement(&requests_failed);
-    const bool failed = outcome[0] == 'r' || outcome[0] == 'z' || outcome[0] == 'u' || outcome[0] == 'p';  // read, zlib, unknown, page write
+    const bool failed = (data == nullptr || !written) && std::strcmp(outcome, "empty") != 0;
+    if (failed) InterlockedIncrement(&requests_failed);
     if (failed && self) InterlockedExchange(&self->pending, static_cast<LONG>(E_FAIL));
     static LONG summaries, failures;
     if (InterlockedIncrement(&summaries) <= 12 || (failed && InterlockedIncrement(&failures) <= 12))
@@ -434,10 +473,8 @@ void __stdcall queue_enqueue_request(Object* self, const unsigned char* request)
     if (options & (1ull << 21)) {
         const auto* title = *reinterpret_cast<const ULONG_PTR* const*>(request + 0x08);
         const unsigned destination_size = *reinterpret_cast<const unsigned*>(request + 0x18);
-        const unsigned uncompressed_size = *reinterpret_cast<const unsigned*>(request + 0x38);
-        const unsigned size = (uncompressed_size > destination_size) ? uncompressed_size : destination_size;
         const unsigned page_offset = static_cast<unsigned>(*reinterpret_cast<const u64*>(request + 0x10) & 0xFFFF);
-        const std::size_t pages = (std::size_t{page_offset} + size + 0xFFFF) / 0x10000;
+        const std::size_t pages = (std::size_t{page_offset} + destination_size + 0xFFFF) / 0x10000;
         if (title && pages && x2w_local::readable(title, pages * sizeof(ULONG_PTR))) {
             entry.tokens.assign(title, title + pages);
             for (ULONG_PTR token : entry.tokens)

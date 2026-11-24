@@ -91,6 +91,13 @@ for scenario, stdout in (("none", ""), ("physical", "physical ok")):
     if not ok:
         failures.append(f"{scenario} control: exit {run.returncode}, stderr {run.stderr.strip()!r}")
 
+run = subprocess.run([consumer, "dstorage"], capture_output=True, text=True, env=env, timeout=20)
+traps_after = open(log, encoding="ascii").read().count("x2w-trap ") if os.path.exists(log) else 0
+ok = run.returncode == 0 and "dstorage ok" in run.stdout and "x2w-trap" not in run.stderr and traps_after == len(cases)
+print(f"dstorage control: exit={run.returncode} {'ok' if ok else 'MISMATCH'}")
+if not ok:
+    failures.append(f"dstorage control: exit {run.returncode}, stderr {run.stderr.strip()!r}")
+
 if failures:
     print("FAIL")
     for f in failures:
