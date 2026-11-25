@@ -2597,6 +2597,20 @@ element, and widths, addresses and first elements above 4 GiB. Its `_control` ru
 `exact-fit`, `first-32`) expect wrong answers and must fail. `startup_address_buffer_srv_*` exercises
 only the resolve path with valid addresses on a device, so it does not cover the rejections.
 
-- `ctest --preset release --no-tests=error -R '^startup_memory_srv_(report|buffer)$' -V`
-- `ctest --preset release --no-tests=error -R '^startup_memory_srv_buffer_.*_control$' -V`
-- `ctest --preset release --no-tests=error -R '^startup_address_(srv|buffer_srv)_' -V`
+`startup_memory_srv_volume` is device-free and validates volume (Texture3D) memory SRVs in
+device slot 70 (`supports_volume_memory_srv`, `address_view_fits`, `volume_texture_bytes`).
+It pins the supported layout to `D3D12_TEXTURE_LAYOUT_UNKNOWN`, enforces `D3D12_SRV_DIMENSION_TEXTURE3D`,
+validates block-compressed dimensions and sizing (BC3, BC7), and validates mip bounds. Its `_control`
+runs (`layout`, `2d-view`, `3d-view`, `mips-overflow`) expect wrong answers and must fail.
+In device runtime, `address_texture_bytes` uses `SliceFootprints::size` to account for desktop copyable
+footprint layout (256-byte row pitch alignment and 512-byte subresource placement alignment), while
+`volume_texture_bytes` provides device-free packed texel byte sizing.
+`startup_address_volume_srv_*` exercises volume SRVs on a device (WARP and hardware)
+with multiple depth slices and mip levels, where footprint row pitch (256 bytes) exceeds packed row bytes (16 bytes),
+and verifies refusal lines for mismatched view dimensions, short backings, out-of-bounds mips, explicit clamps,
+and console layouts. On Windows 11 Build 26100 with an AMD Radeon RX 6600M (driver 32.0.21045.11001),
+`startup_address_volume_srv_hardware` passed with all 32 RGBA pixels exact.
+
+- `ctest --preset release --no-tests=error -R '^startup_memory_srv_(report|buffer|volume)$' -V`
+- `ctest --preset release --no-tests=error -R '^startup_memory_srv_(buffer|volume)_.*_control$' -V`
+- `ctest --preset release --no-tests=error -R '^startup_address_(srv|buffer_srv|volume_srv)_' -V`

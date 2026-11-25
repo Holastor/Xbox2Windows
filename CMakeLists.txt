@@ -1609,6 +1609,16 @@ foreach(mutation IN ITEMS height exact-fit first-32)
     add_test(NAME startup_memory_srv_buffer_${mutation}_control COMMAND startup_memory_srv_buffer_check --mutate ${mutation})
     set_tests_properties(startup_memory_srv_buffer_${mutation}_control PROPERTIES WILL_FAIL TRUE)
 endforeach()
+# Volume memory SRV validation for device slot 70 (src/startup_stubs/address_texture.h); the mutated
+# runs are negative controls.
+add_executable(startup_memory_srv_volume_check tests/startup_memory_srv_volume_check.cpp)
+target_include_directories(startup_memory_srv_volume_check PRIVATE src)
+target_compile_features(startup_memory_srv_volume_check PRIVATE cxx_std_17)
+add_test(NAME startup_memory_srv_volume COMMAND startup_memory_srv_volume_check)
+foreach(mutation IN ITEMS layout 2d-view 3d-view mips-overflow)
+    add_test(NAME startup_memory_srv_volume_${mutation}_control COMMAND startup_memory_srv_volume_check --mutate ${mutation})
+    set_tests_properties(startup_memory_srv_volume_${mutation}_control PROPERTIES WILL_FAIL TRUE)
+endforeach()
 # Console allocation sizes for depth-with-stencil and multisampled textures
 # (src/startup_stubs/console_plane_size.h); the mutated run is the negative control.
 add_executable(startup_plane_size_check tests/startup_plane_size_check.cpp)
@@ -3285,6 +3295,10 @@ if(EXISTS "${INTAKE_PYTHON}")
             "${INTAKE_PYTHON}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_address_buffer_srv_check.py"
             "$<TARGET_FILE:startup_stream_consumer>" "${backend}")
         set_tests_properties(startup_address_buffer_srv_${backend} PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+        add_test(NAME startup_address_volume_srv_${backend} COMMAND "${CMAKE_COMMAND}" -E env "X2W_FXC=${STARTUP_FXC}"
+            "${INTAKE_PYTHON}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_address_volume_srv_check.py"
+            "$<TARGET_FILE:startup_stream_consumer>" "${backend}")
+        set_tests_properties(startup_address_volume_srv_${backend} PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
         add_test(NAME startup_d16_srv_${backend} COMMAND "${CMAKE_COMMAND}" -E env "X2W_FXC=${STARTUP_FXC}"
             "${INTAKE_PYTHON}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup_d16_srv_check.py"
             "$<TARGET_FILE:startup_stream_consumer>" "${backend}")

@@ -88,6 +88,7 @@ bool supports_placed_memory_srv(const D3D12_RESOURCE_DESC& r, const D3D12_SHADER
                !v.Texture2D.PlaneSlice && v.Texture2D.ResourceMinLODClamp == 0;
     }
     if (x2w_startup::supports_single_element_srv(r, v)) return true;
+    if (x2w_startup::supports_volume_memory_srv(r, v)) return true;
     return r.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && r.Width && r.Height &&
            r.DepthOrArraySize == 1 && r.MipLevels == 1 && r.SampleDesc.Count == 1 && r.SampleDesc.Quality == 0 &&
            (r.Format == DXGI_FORMAT_R8_UNORM || tiled_bc_srv(r)) && v.Format == r.Format && !(r.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) &&
@@ -114,7 +115,9 @@ bool desktop_address_view_supported(Wrapper* device, const D3D12_RESOURCE_DESC& 
     D3D12_FEATURE_DATA_FORMAT_SUPPORT storage{r.Format};
     if (r.Format == v.Format) storage = view;
     else if (FAILED(desktop->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &storage, sizeof(storage)))) return false;
-    return (storage.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D) &&
+    const UINT req = r.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? D3D12_FORMAT_SUPPORT1_TEXTURE3D
+                                                                       : D3D12_FORMAT_SUPPORT1_TEXTURE2D;
+    return (storage.Support1 & req) &&
            (r.MipLevels == 1 || (storage.Support1 & D3D12_FORMAT_SUPPORT1_MIP));
 }
 
@@ -285,11 +288,18 @@ void log_address_kind(const char* outcome, const D3D12_RESOURCE_DESC& r, const D
 }
 
 // Bytes the texels of a by-address texture span at their address.
-u64 address_texture_bytes(const D3D12_RESOURCE_DESC& desc)
+u64 address_texture_bytes(Wrapper* device, const D3D12_RESOURCE_DESC& desc)
 {
     if (const UINT element = x2w_startup::single_element_bytes(desc)) return element;
     if (x2w_startup::bc64::supports(desc)) return x2w_startup::bc64::Chain(desc).bytes();
     if (console_layout_srv(desc)) return x2w_startup::gfx10::Layout(desc).bytes();
+    if (desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+        if (device) {
+            const x2w_startup::SliceFootprints plan(device_of(device), sanitized(desc), desc.MipLevels ? desc.MipLevels : 1);
+            if (plan.size != UINT64_MAX && plan.size) return plan.size;
+        }
+        return x2w_startup::volume_texture_bytes(desc);
+    }
     return x2w_startup::Bc16Surface(desc).size();
 }
 
@@ -311,7 +321,7 @@ const char* console_address_hold(Wrapper* device, u64 address, const D3D12_RESOU
 
 Wrapper* publish_tiled_texture(Wrapper* device, u64 address, const D3D12_RESOURCE_DESC& desc)
 {
-    const auto bytes = address_texture_bytes(desc);
+    const auto bytes = address_texture_bytes(device, desc);
     // The transient upload ring accepts individual copies up to 64 MiB.
     if (bytes > (64ull << 20) || !x2w_local::readable(reinterpret_cast<const void*>(address), bytes)) return nullptr;
     std::lock_guard lock(tiled_srv_mutex);
@@ -474,7 +484,7 @@ void __stdcall device_memory_srv(Wrapper* self, const D3D12_RESOURCE_DESC* resou
             texture = nullptr;
         } else if (!texture) {
             held = console_address_hold(self, input->address, *resource);
-            if (!held && address_resource_overlap(input->address, address_texture_bytes(*resource)))
+            if (!held && address_resource_overlap(input->address, address_texture_bytes(self, *resource)))
                 held = "overlapping_resource";
             texture = held ? nullptr : publish_tiled_texture(self, input->address, *resource);
             outcome = "published console layout";
