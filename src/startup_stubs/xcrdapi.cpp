@@ -159,6 +159,7 @@ static bool destination_writable(const void* destination, std::size_t bytes)
     if (bytes == 0) return true;
     std::uintptr_t cursor = reinterpret_cast<std::uintptr_t>(destination);
     if (!destination || bytes > UINTPTR_MAX - cursor) return false;
+    x2w_local::commit_lazy(destination, bytes);  // lazily mapped physical pages (X2W_XMEM_LAZY_COMMIT)
     const std::uintptr_t end = cursor + bytes;
     while (cursor < end) {
         MEMORY_BASIC_INFORMATION info{};
@@ -740,7 +741,7 @@ void execute_request(Object* self, const unsigned char* request, const ULONG_PTR
         }
         bool bcpack_decoded = false;
         if (data && bcpack) {
-            if (bcpack == 7 || bcpack == 1) {
+            if (bcpack == 7 || bcpack == 1 || bcpack == 4 || bcpack == 5 || bcpack == 3) {
                 std::vector<unsigned char> decoded(destination_size);
                 std::size_t produced = 0;
                 if (x2w_bcpack::decode_bcpack(data, decode_length, bcpack, decoded.data(), decoded.size(), &produced)) {

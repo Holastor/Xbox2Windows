@@ -4,10 +4,6 @@ long __stdcall gfx10_layout(Computer* self, unsigned char* out)
 {
     if (!out) return E_POINTER;
     std::memset(out, 0, layout_header + 4 * plane_bytes + 8);
-    if (self->bc7_4k_s_layout) {
-        write_bc7_4k_s_layout(self->desc, out);
-        return S_OK;
-    }
     const x2w_startup::Gfx10Texture tex(self->desc);
     put64(out, tex.bytes());
     put64(out + 8, tex.alignment());
@@ -55,26 +51,6 @@ template<bool into>
 long __stdcall gfx10_copy(Computer* self, unsigned char* target, UINT plane, UINT subresource, const unsigned char* source,
                           UINT pitch, UINT slice_pitch)
 {
-    if (self->bc7_4k_s_layout) {
-        if (plane || subresource) return E_INVALIDARG;
-        if constexpr (into) {
-            using NotifyBc7 = void (*)(void*, UINT, UINT);
-            const HMODULE d3d = GetModuleHandleW(L"d3d12_xs.dll");
-            const auto notify = d3d ? reinterpret_cast<NotifyBc7>(GetProcAddress(d3d, "x2w_d3d12_bc7_4k_s_written")) : nullptr;
-            if (!notify && x2w_local::env_on("X2W_D3D12_RENDER")) return E_NOTIMPL;
-            const HRESULT hr = copy_bc7_4k_s(self->desc, target, source, pitch, slice_pitch);
-            if (SUCCEEDED(hr) && notify) notify(target, static_cast<UINT>(self->desc.Width), self->desc.Height);
-            return hr;
-        } else {
-            const x2w_startup::Bc16Surface surface(self->desc);
-            const UINT row_bytes = surface.columns * x2w_startup::Bc16Surface::block_bytes;
-            const u64 linear_bytes = u64{surface.rows - 1} * pitch + row_bytes;
-            if (!target || !source || pitch < row_bytes || (slice_pitch && slice_pitch < linear_bytes)) return E_INVALIDARG;
-            if (!x2w_local::readable(source, surface.size()) || !x2w_local::writable(target, linear_bytes)) return E_FAIL;
-            surface.detile(source, target, pitch);
-            return S_OK;
-        }
-    }
     const x2w_startup::Gfx10Texture tex(self->desc);
     if (plane || subresource >= tex.levels * tex.slices || !target || !source) return E_INVALIDARG;
     const UINT level = subresource % tex.levels, slice = subresource / tex.levels;
@@ -91,7 +67,6 @@ long __stdcall gfx10_copy(Computer* self, unsigned char* target, UINT plane, UIN
     if constexpr (into) notify_texture_write(target, tex.bytes());
     return S_OK;
 }
-
 u64 __stdcall gfx10_size(Computer* self) { return x2w_startup::Gfx10Texture(self->desc).bytes(); }
 u64 __stdcall gfx10_alignment(Computer* self) { return x2w_startup::Gfx10Texture(self->desc).alignment(); }
 u64 __stdcall gfx10_offset(Computer* self, UINT plane, UINT level)
@@ -149,6 +124,14 @@ long __stdcall bc64_copy(Computer* self, unsigned char* target, UINT plane, UINT
                          UINT pitch, UINT slice_pitch)
 {
     return gfx10_copy<into>(self, target, plane, subresource, source, pitch, slice_pitch);
+}
+long __stdcall bc64_copy_from(Computer* self, unsigned char* target, UINT plane, UINT subresource,
+                              UINT scarlett_option, const unsigned char* source, UINT pitch, UINT slice_pitch)
+{
+    // DirectXTex's Scarlett copy-out call passes zero between the subresource and the tiled base.
+    // Reject unknown options before interpreting the remaining arguments or touching either buffer.
+    if (scarlett_option != 0) return E_NOTIMPL;
+    return bc64_copy<false>(self, target, plane, subresource, source, pitch, slice_pitch);
 }
 inline u64 __stdcall bc64_size(Computer* self) { return gfx10_size(self); }
 inline u64 __stdcall bc64_alignment(Computer* self) { return gfx10_alignment(self); }

@@ -18,6 +18,9 @@ ALIGN = ct.WINFUNCTYPE(UINT64, PTR)
 OFFSET = ct.WINFUNCTYPE(UINT64, PTR, UINT, UINT)
 ELEMENT = ct.WINFUNCTYPE(UINT64, PTR, UINT, UINT, UINT64, UINT, UINT, UINT, PTR)
 COPY_INTO = ct.WINFUNCTYPE(HRESULT, PTR, PTR, UINT, UINT, PTR, UINT, UINT)
+# Scarlett copy-out (slot 9) passes an extra option UINT between the subresource and the tiled
+# base (DirectXTex XboxDetile); slot 8 keeps the shorter copy-in prototype.
+COPY_FROM = ct.WINFUNCTYPE(HRESULT, PTR, PTR, UINT, UINT, UINT, PTR, UINT, UINT)
 RELEASE = ct.WINFUNCTYPE(UINT64, PTR)
 TILING = ct.WINFUNCTYPE(HRESULT, PTR, PTR, PTR, PTR, PTR, UINT, PTR)
 
@@ -149,7 +152,8 @@ def test_format(create, name, fmt, width, height, mips, slices, layout_code, bpe
 
                 # Slot 9: CopyFromSubresource (tiled -> linear)
                 dest_buf = ct.create_string_buffer(b"\xaa" * len(linear_src), len(linear_src))
-                rc = COPY_INTO(slots[9])(computer, dest_buf, 0, subresource, tiled_buf, row_pitch, len(linear_src))
+                copy_from_slice_pitch = 0 if (m & 1) else len(linear_src)
+                rc = COPY_FROM(slots[9])(computer, dest_buf, 0, subresource, 0, tiled_buf, row_pitch, copy_from_slice_pitch)
                 assert rc == 0, f"{name} mip {m} CopyFromSubresource failed: 0x{rc & 0xFFFFFFFF:08x}"
 
                 for y in range(mh):
@@ -213,7 +217,7 @@ def test_implicit_and_unsupported_routing(create):
             bit = UINT(99)
             assert ELEMENT(slots[6])(computer, 0, 0, 0, 0, 0, 0, ct.byref(bit)) == 0
             # Slot 9 (CopyFromSubresource) on Gfx10 returns E_INVALIDARG for null/zero pitch; desktop no-op returns 0
-            assert COPY_INTO(slots[9])(computer, None, 0, 0, None, 0, 0) == 0, (
+            assert COPY_FROM(slots[9])(computer, None, 0, 0, 0, None, 0, 0) == 0, (
                 f"{name}: unexpectedly routed to GFX10 slot 9"
             )
             if fmt == 28 and layout_code == 0:
@@ -248,26 +252,26 @@ def test_negative_controls(create):
         # 1. pitch < row_bytes
         rc = COPY_INTO(slots[8])(computer, tiled_buf, 0, 0, linear_src, row_pitch - 1, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
-        rc = COPY_INTO(slots[9])(computer, linear_src, 0, 0, tiled_buf, row_pitch - 1, len(linear_src))
+        rc = COPY_FROM(slots[9])(computer, linear_src, 0, 0, 0, tiled_buf, row_pitch - 1, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
 
         # 2. Out-of-range plane
         rc = COPY_INTO(slots[8])(computer, tiled_buf, 1, 0, linear_src, row_pitch, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
-        rc = COPY_INTO(slots[9])(computer, linear_src, 1, 0, tiled_buf, row_pitch, len(linear_src))
+        rc = COPY_FROM(slots[9])(computer, linear_src, 1, 0, 0, tiled_buf, row_pitch, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
 
         # 3. Out-of-range subresource
         rc = COPY_INTO(slots[8])(computer, tiled_buf, 0, 1, linear_src, row_pitch, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
-        rc = COPY_INTO(slots[9])(computer, linear_src, 0, 1, tiled_buf, row_pitch, len(linear_src))
+        rc = COPY_FROM(slots[9])(computer, linear_src, 0, 1, 0, tiled_buf, row_pitch, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
 
         # 4. Overlapping source and destination buffers
         overlap_buf = ct.create_string_buffer(total_size)
         rc = COPY_INTO(slots[8])(computer, overlap_buf, 0, 0, overlap_buf, row_pitch, total_size)
         assert (rc & 0xFFFFFFFF) == 0x80070057
-        rc = COPY_INTO(slots[9])(computer, overlap_buf, 0, 0, overlap_buf, row_pitch, total_size)
+        rc = COPY_FROM(slots[9])(computer, overlap_buf, 0, 0, 0, overlap_buf, row_pitch, total_size)
         assert (rc & 0xFFFFFFFF) == 0x80070057
 
         # 5. Null pointers
@@ -275,11 +279,48 @@ def test_negative_controls(create):
         assert (rc & 0xFFFFFFFF) == 0x80070057
         rc = COPY_INTO(slots[8])(computer, tiled_buf, 0, 0, None, row_pitch, len(linear_src))
         assert (rc & 0xFFFFFFFF) == 0x80070057
+        rc = COPY_FROM(slots[9])(computer, None, 0, 0, 0, tiled_buf, row_pitch, len(linear_src))
+        assert (rc & 0xFFFFFFFF) == 0x80070057
+        rc = COPY_FROM(slots[9])(computer, linear_src, 0, 0, 0, None, row_pitch, len(linear_src))
+        assert (rc & 0xFFFFFFFF) == 0x80070057
+
+        # 6. Non-zero slice_pitch < linear_bytes
+        rc = COPY_INTO(slots[8])(computer, tiled_buf, 0, 0, linear_src, row_pitch, len(linear_src) - 1)
+        assert (rc & 0xFFFFFFFF) == 0x80070057
+        rc = COPY_FROM(slots[9])(computer, linear_src, 0, 0, 0, tiled_buf, row_pitch, len(linear_src) - 1)
+        assert (rc & 0xFFFFFFFF) == 0x80070057
+
+        # 7. Non-zero scarlett_option in CopyFromSubresource (slot 9) -> E_NOTIMPL without touching dest
+        sentinel = b"\xad" * len(linear_src)
+        refused_buf = ct.create_string_buffer(sentinel, len(sentinel))
+        for opt in (1, 0xFFFFFFFF):
+            rc = COPY_FROM(slots[9])(computer, refused_buf, 0, 0, opt, tiled_buf, row_pitch, 0)
+            assert (rc & 0xFFFFFFFF) == 0x80004001, f"opt={opt}: expected E_NOTIMPL, got 0x{rc & 0xFFFFFFFF:08x}"
+            assert refused_buf.raw == sentinel, "unsupported copy-out option changed destination"
+        rc = COPY_FROM(slots[9])(computer, None, 0, 1, 1, None, 0, 0)
+        assert (rc & 0xFFFFFFFF) == 0x80004001, "non-zero option must fail with E_NOTIMPL before arg checks"
 
     finally:
         RELEASE(slots[1])(computer)
 
-    # 6. Descriptor with MipLevels > 16 rejected from GFX10 tiling (falls back to desktop path)
+    # Also verify non-zero scarlett_option refusal on an uncompressed GFX10 surface (RGBA8 64x64 4KB_S)
+    desc_rgba = ct.create_string_buffer(DESC.pack(3, 0, 64, 64, 1, 1, 28, 1, 0, 0x105, 0))
+    comp_rgba = PTR()
+    hr = create(desc_rgba, ct.byref(comp_rgba), 0, 0)
+    assert hr == 0 and comp_rgba, "Failed to create RGBA8 computer for slot 9 option check"
+    s_rgba = ct.cast(comp_rgba, ct.POINTER(ct.POINTER(PTR)))[0]
+    try:
+        rgba_size = SIZE(s_rgba[3])(comp_rgba)
+        rgba_tiled = ct.create_string_buffer(rgba_size)
+        rgba_sentinel = b"\xad" * (64 * 64 * 4)
+        rgba_refused = ct.create_string_buffer(rgba_sentinel, len(rgba_sentinel))
+        rc = COPY_FROM(s_rgba[9])(comp_rgba, rgba_refused, 0, 0, 1, rgba_tiled, 64 * 4, 0)
+        assert (rc & 0xFFFFFFFF) == 0x80004001
+        assert rgba_refused.raw == rgba_sentinel, "RGBA8 unsupported copy-out option changed destination"
+    finally:
+        RELEASE(s_rgba[1])(comp_rgba)
+
+    # 8. Descriptor with MipLevels > 16 rejected from GFX10 tiling (falls back to desktop path)
     desc_over_mips = ct.create_string_buffer(
         DESC.pack(3, 0, 64, 64, 1, 17, 98, 1, 0, 0x109, 0)
     )
@@ -289,7 +330,7 @@ def test_negative_controls(create):
         s = ct.cast(comp_over, ct.POINTER(ct.POINTER(PTR)))[0]
         try:
             assert SIZE(s[3])(comp_over) == 0, "MipLevels=17 unexpectedly routed to GFX10 slot 3"
-            assert COPY_INTO(s[9])(comp_over, None, 0, 0, None, 0, 0) == 0, (
+            assert COPY_FROM(s[9])(comp_over, None, 0, 0, 0, None, 0, 0) == 0, (
                 "MipLevels=17 unexpectedly routed to GFX10 slot 9"
             )
             layout_buf = ct.create_string_buffer(LAYOUT_BYTES)
@@ -298,7 +339,7 @@ def test_negative_controls(create):
             assert l_mips == 15, f"MipLevels=17 expected desktop clamp to 15, got {l_mips}"
         finally:
             RELEASE(s[1])(comp_over)
-    print("  Negative controls: PASS (pitch < row_bytes, plane/subresource out of range, overlap, null, mips > 16)")
+    print("  Negative controls: PASS (pitch < row_bytes, plane/subresource out of range, overlap, null, slice_pitch, scarlett_option, mips > 16)")
 
 
 def test_pinned_addrlib_offsets(create):
