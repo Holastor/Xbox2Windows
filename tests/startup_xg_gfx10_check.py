@@ -301,6 +301,118 @@ def test_negative_controls(create):
     print("  Negative controls: PASS (pitch < row_bytes, plane/subresource out of range, overlap, null, mips > 16)")
 
 
+def test_pinned_addrlib_offsets(create):
+    """Pin expected element byte offsets per element size (1, 2, 4, 8, 16) from Mesa 25.1.0 addrlib."""
+    # Offsets collected from xg_gfx10_tiling_reference (AMD addrlib, navi21) so any swizzle bit
+    # permutation (such as swapping PATTERN_S/PATTERN_D bits or mip-tail origins) fails even when
+    # addrlib is not configured in the build.
+    pinned_cases = [
+        # bpe=1 (_S and _D)
+        ("R8 256x256 4-mip 64KB_S", 61, 256, 256, 4, 0x109, 1, 1, {
+            (0, 0, 0): 0x10000, (0, 1, 0): 0x10001, (0, 2, 0): 0x10002, (0, 4, 0): 0x10004,
+            (0, 8, 0): 0x10008, (0, 16, 0): 0x10200,
+            (0, 0, 1): 0x10010, (0, 0, 2): 0x10020, (0, 0, 4): 0x10040, (0, 0, 8): 0x10080,
+            (0, 0, 16): 0x10100,
+        }),
+        ("R8 64x64 1-mip 4KB_D", 61, 64, 64, 1, 0x106, 1, 1, {
+            (0, 0, 0): 0x0, (0, 1, 0): 0x1, (0, 2, 0): 0x2, (0, 4, 0): 0x4, (0, 8, 0): 0x40,
+            (0, 0, 1): 0x10, (0, 0, 2): 0x8, (0, 0, 4): 0x20, (0, 0, 8): 0x80,
+        }),
+        # bpe=2 (_S and _D)
+        ("R16 64x64 3-mip 4KB_S", 56, 64, 64, 3, 0x105, 2, 1, {
+            (0, 0, 0): 0x1000, (0, 1, 0): 0x1002, (0, 2, 0): 0x1004, (0, 4, 0): 0x1008,
+            (0, 8, 0): 0x1080,
+            (0, 0, 1): 0x1010, (0, 0, 2): 0x1020, (0, 0, 4): 0x1040, (0, 0, 8): 0x1100,
+        }),
+        ("RG8 64x64 3-mip 4KB_D", 49, 64, 64, 3, 0x106, 2, 1, {
+            (0, 0, 0): 0x1000, (0, 1, 0): 0x1002, (0, 2, 0): 0x1004, (0, 4, 0): 0x1008,
+            (0, 8, 0): 0x1080,
+            (0, 0, 1): 0x1010, (0, 0, 2): 0x1020, (0, 0, 4): 0x1040,
+        }),
+        # bpe=4 (_S and _D)
+        ("BGRA8 64x64 3-mip 4KB_S", 87, 64, 64, 3, 0x105, 4, 1, {
+            (0, 0, 0): 0x2000, (0, 1, 0): 0x2004, (0, 2, 0): 0x2008, (0, 4, 0): 0x2080,
+            (0, 8, 0): 0x2200,
+            (0, 0, 1): 0x2010, (0, 0, 2): 0x2020, (0, 0, 4): 0x2040, (0, 0, 8): 0x2100,
+        }),
+        ("RGBA8 128x128 4-mip 64KB_S", 28, 128, 128, 4, 0x109, 4, 1, {
+            (0, 0, 0): 0x10000, (0, 1, 0): 0x10004, (0, 2, 0): 0x10008, (0, 4, 0): 0x10080,
+            (0, 8, 0): 0x10200,
+            (0, 0, 1): 0x10010, (0, 0, 2): 0x10020, (0, 0, 4): 0x10040, (0, 0, 8): 0x10100,
+        }),
+        ("R32 64x64 3-mip 256B_D", 41, 64, 64, 3, 0x102, 4, 1, {
+            (0, 0, 0): 0x1400, (0, 1, 0): 0x1404, (0, 2, 0): 0x1408, (0, 4, 0): 0x1440,
+            (0, 0, 1): 0x1410, (0, 0, 2): 0x1420, (0, 0, 4): 0x1480,
+        }),
+        # bpe=8 (_S and _D)
+        ("BC1 256x256 5-mip 64KB_S", 71, 256, 256, 5, 0x109, 8, 4, {
+            (0, 0, 0): 0x8000, (0, 1, 0): 0x8008, (0, 2, 0): 0x8040, (0, 4, 0): 0x8080,
+            (0, 8, 0): 0x8200,
+            (0, 0, 1): 0x8010, (0, 0, 2): 0x8020, (0, 0, 4): 0x8100,
+        }),
+        ("RGBA16 64x64 3-mip 64KB_D", 10, 64, 64, 3, 0x10A, 8, 1, {
+            (0, 0, 0): 0x8000, (0, 1, 0): 0x8008, (0, 2, 0): 0x8020, (0, 4, 0): 0x8040,
+            (0, 0, 1): 0x8010, (0, 0, 2): 0x8080, (0, 0, 4): 0x8100,
+        }),
+        # bpe=16 (_S, _D, and mip tail)
+        ("RGBA32 32x32 3-mip 4KB_S", 2, 32, 32, 3, 0x105, 16, 1, {
+            (0, 0, 0): 0x2000, (0, 1, 0): 0x2040, (0, 2, 0): 0x2080, (0, 4, 0): 0x2200,
+            (0, 0, 1): 0x2010, (0, 0, 2): 0x2020, (0, 0, 4): 0x2100,
+        }),
+        ("BC5 256x256 4-mip 64KB_D", 83, 256, 256, 4, 0x10A, 16, 4, {
+            (0, 0, 0): 0x10000, (0, 1, 0): 0x10010, (0, 2, 0): 0x10040, (0, 4, 0): 0x10200,
+            (0, 0, 1): 0x10020, (0, 0, 2): 0x10080, (0, 0, 4): 0x10100,
+        }),
+        ("BC7 64x64 7-mip 4KB_S", 98, 64, 64, 7, 0x105, 16, 4, {
+            (0, 0, 0): 0x1000, (0, 1, 0): 0x1040, (0, 2, 0): 0x1080,
+            (0, 0, 1): 0x1010, (0, 0, 2): 0x1020,
+            (2, 0, 0): 0x600, (2, 1, 0): 0x640, (2, 0, 1): 0x610,
+            (3, 0, 0): 0x500, (3, 1, 0): 0x540, (3, 0, 1): 0x510,
+            (4, 0, 0): 0x400, (5, 0, 0): 0x300, (6, 0, 0): 0x200,
+        }),
+    ]
+
+    for name, fmt, w, h, mips, layout, bpe, bdim, expected_map in pinned_cases:
+        desc = ct.create_string_buffer(DESC.pack(3, 0, w, h, 1, mips, fmt, 1, 0, layout, 0))
+        computer = PTR()
+        hr = create(desc, ct.byref(computer), 0, 0)
+        assert hr == 0 and computer, f"{name}: create failed"
+        slots = ct.cast(computer, ct.POINTER(ct.POINTER(PTR)))[0]
+        try:
+            total_size = SIZE(slots[3])(computer)
+            tiled_buf = ct.create_string_buffer(total_size)
+            bit = UINT(0)
+            by_mip = {}
+            for (mip, x, y), exp_addr in expected_map.items():
+                got_addr = ELEMENT(slots[6])(computer, 0, mip, x, y, 0, 0, ct.byref(bit))
+                assert bit.value == 0 and got_addr == exp_addr, (
+                    f"{name} mip {mip} ({x},{y}): slot6 addr=0x{got_addr:x}, expected 0x{exp_addr:x}"
+                )
+                by_mip.setdefault(mip, []).append((x, y, exp_addr))
+
+            for mip, coords in by_mip.items():
+                mw = (max(1, w >> mip) + bdim - 1) // bdim
+                mh = (max(1, h >> mip) + bdim - 1) // bdim
+                row_pitch = mw * bpe
+                linear_src = bytearray(mh * row_pitch)
+                for y in range(mh):
+                    for x in range(mw):
+                        for b in range(bpe):
+                            linear_src[y * row_pitch + x * bpe + b] = ((mip * 31 + x * 13 + y * 29 + b) & 0xFF)
+                src_buf = ct.create_string_buffer(bytes(linear_src), len(linear_src))
+                rc = COPY_INTO(slots[8])(computer, tiled_buf, 0, mip, src_buf, row_pitch, len(linear_src))
+                assert rc == 0, f"{name} mip {mip}: CopyIntoSubresource failed"
+                for x, y, exp_addr in coords:
+                    expected_elem = bytes(linear_src[y * row_pitch + x * bpe: y * row_pitch + (x + 1) * bpe])
+                    actual_elem = tiled_buf.raw[exp_addr: exp_addr + bpe]
+                    assert actual_elem == expected_elem, (
+                        f"{name} mip {mip} ({x},{y}): slot8 wrote wrong bytes at pinned offset 0x{exp_addr:x}"
+                    )
+        finally:
+            RELEASE(slots[1])(computer)
+    print(f"  Pinned addrlib offsets: PASS ({len(pinned_cases)} surfaces across bpe 1/2/4/8/16)")
+
+
 def main(dll_path):
     create = ct.WinDLL(dll_path).XGCreateTextureComputer
     create.argtypes = (PTR, ct.POINTER(PTR), ct.c_uint64, ct.c_uint64)
@@ -320,6 +432,7 @@ def main(dll_path):
         ("BC7 128x64 8-mip 4KB_S", 98, 128, 64, 8, 1, 0x105, 16, 4),
         ("R8 256x256 4-mip 64KB_S", 61, 256, 256, 4, 1, 0x109, 1, 1),
         ("R8 64x64 1-mip 256B_S", 61, 64, 64, 1, 1, 0x101, 1, 1),
+        ("R8 64x64 1-mip 4KB_D", 61, 64, 64, 1, 1, 0x106, 1, 1),
         ("RG8 64x64 3-mip 4KB_D", 49, 64, 64, 3, 1, 0x106, 2, 1),
         ("R16 64x64 3-mip 4KB_S", 56, 64, 64, 3, 1, 0x105, 2, 1),
         ("R32 64x64 3-mip 256B_D", 41, 64, 64, 3, 1, 0x102, 4, 1),
@@ -335,6 +448,7 @@ def main(dll_path):
         test_format(create, name, fmt, w, h, mips, slices, layout, bpe, bdim)
         print(f"  {name}: PASS (layout, offset, element, tiling, slot 8 tile, slot 9 detile exact)")
 
+    test_pinned_addrlib_offsets(create)
     test_implicit_and_unsupported_routing(create)
     test_negative_controls(create)
 

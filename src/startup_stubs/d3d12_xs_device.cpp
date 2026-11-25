@@ -26,6 +26,9 @@
 #include "startup_stubs/bc7_4k_s.h"
 #include "startup_stubs/bc64_chain.h"
 #include "startup_stubs/gfx10_texture.h"
+#include "startup_stubs/address_texture.h"
+#include "startup_stubs/list_upload_pages.h"
+#include <optional>
 #include "startup_stubs/derived_blend.h"
 #include "startup_stubs/placement_publish.h"
 #include "startup_stubs/placed_build.h"
@@ -68,6 +71,12 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+// The heap-indexing bits src/d3d12_xs_shim.cpp removed for the blob it returned at exactly this
+// buffer. A build that compiles this file without the shim (offscreen_check) links the fallback, 0.
+extern "C" std::uint32_t x2w_stripped_root_flags(const void* blob, std::size_t bytes);
+extern "C" std::uint32_t x2w_no_stripped_root_flags(const void*, std::size_t) { return 0; }
+#pragma comment(linker, "/alternatename:x2w_stripped_root_flags=x2w_no_stripped_root_flags")
 
 namespace {
 
@@ -1076,6 +1085,7 @@ void release_targets(Wrapper* self);
 void end_open_queries(Wrapper* self, ID3D12GraphicsCommandList* list);
 void reset_list_dynamic_state(Wrapper* self);
 void discard_draw_sampler_heaps(ID3D12CommandList* list);
+void discard_address_uploads(ID3D12CommandList* list);
 void use_as_target(Wrapper* self, ID3D12Resource* resource);
 bool is_container(const void* p);
 bool shader_dump_dir(wchar_t* out, DWORD size);
@@ -1354,6 +1364,7 @@ HRESULT __stdcall list_reset(Wrapper* self, void* allocator)
     if (SUCCEEDED(hr)) {
         reset_list_dynamic_state(self);
         discard_draw_sampler_heaps(previous);
+        discard_address_uploads(previous);
         if (draw_dump_frame()) draw_dumps().discard(previous);
     }
     InterlockedIncrement(SUCCEEDED(hr) ? &render_resets : &render_reset_failures);
@@ -1387,6 +1398,7 @@ HRESULT __stdcall list_close(Wrapper* self)
     InterlockedIncrement(&render_closes);
     if (FAILED(hr)) {
         discard_draw_sampler_heaps(list);
+        discard_address_uploads(list);
         if (draw_dump_frame()) draw_dumps().discard(list);
         static LONG failures;
         if (first_calls(failures, 6)) log("x2w-render list Close failed 0x%08lx", static_cast<unsigned long>(hr));
@@ -1641,6 +1653,22 @@ HRESULT __stdcall device_create_root_signature(Wrapper* self, UINT node, const v
     ReleaseSRWLockExclusive(&root_lock);
     *out = w;
     return S_OK;
+}
+
+// Fixtures: the copy of a root signature's blob kept for shader translation (the .root request and the
+// translation key). Returns its size and copies up to capacity bytes to out; 0 for anything else. The
+// heap-indexing flags slot 34 acts on (root_heap_flags, read from the desktop blob) go to heap_flags.
+extern "C" __declspec(dllexport) std::size_t x2w_d3d12_root_translation_blob(void* root, void* out, std::size_t capacity, UINT* heap_flags)
+{
+    Wrapper* w = as_wrapper(root);
+    if (!w || w->own().kind != root_signature_kind) return 0;
+    if (heap_flags) *heap_flags = root_heap_flags(w);
+    AcquireSRWLockShared(&note_lock);
+    const auto found = root_blobs().find(w);
+    const std::size_t bytes = found == root_blobs().end() ? 0 : found->second.size();
+    if (bytes && out) std::memcpy(out, found->second.data(), bytes < capacity ? bytes : capacity);
+    ReleaseSRWLockShared(&note_lock);
+    return bytes;
 }
 
 bool readable_shader_container(const D3D12_SHADER_BYTECODE& code)
@@ -2599,6 +2627,7 @@ struct TextureWrite {
 };
 std::unordered_map<u64, TextureWrite>& written_textures();
 ID3D12Resource* sampled_address_texture(Wrapper* resource);
+bool console_layout_srv(const D3D12_RESOURCE_DESC& desc);
 #include "startup_stubs/d3d12_draw.inl"
 
 // Queue slot 10, desktop ExecuteCommandLists(count, lists).
@@ -2629,6 +2658,7 @@ void __stdcall queue_execute(Wrapper* self, UINT count, void* const* lists)
                 queue->ExecuteCommandLists(ready_count, ready.data());
             }
             retire_draw_sampler_heaps(queue, ready);
+            retire_address_uploads(queue, ready);
             note_submits(queue, submitted);
             InterlockedIncrement(&render_executes);
         }
