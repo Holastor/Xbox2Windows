@@ -5647,6 +5647,9 @@ void build_tables()
     if (render_mode()) {
         list_typed[9] = reinterpret_cast<ListTyped>(&list_close);
         list_typed[51] = reinterpret_cast<ListTyped>(&list_clear_depth_stencil);
+        // Slot 51 is also entered through the generic invoke() path (the fixture calls list vtable[51]
+        // directly), so it must be present in tables[list_kind] as well as list_typed; siblings 52-55
+        // are only reached through list_typed and do not set both.
         tables[list_kind][51] = reinterpret_cast<void*>(&list_clear_depth_stencil);
         list_typed[52] = reinterpret_cast<ListTyped>(&list_clear_target);
         list_typed[15] = reinterpret_cast<ListTyped>(&list_copy_buffer_region);
