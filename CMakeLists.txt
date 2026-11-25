@@ -1877,6 +1877,10 @@ add_executable(startup_memory_srv_buffer_check tests/startup_memory_srv_buffer_c
 target_include_directories(startup_memory_srv_buffer_check PRIVATE src)
 target_compile_features(startup_memory_srv_buffer_check PRIVATE cxx_std_17)
 add_test(NAME startup_memory_srv_buffer COMMAND startup_memory_srv_buffer_check)
+foreach(mutation IN ITEMS height exact-fit first-32 unplaced-extent unplaced-covers)
+    add_test(NAME startup_memory_srv_buffer_${mutation}_control COMMAND startup_memory_srv_buffer_check --mutate ${mutation})
+    set_tests_properties(startup_memory_srv_buffer_${mutation}_control PROPERTIES WILL_FAIL TRUE)
+endforeach()
 # Descriptor word 3 for formatted buffer loads (src/startup_stubs/buffer_format_word3.h); the mutated run must fail.
 add_executable(startup_buffer_format_word3_check tests/startup_buffer_format_word3_check.cpp)
 target_include_directories(startup_buffer_format_word3_check PRIVATE src)
@@ -1884,10 +1888,6 @@ target_compile_features(startup_buffer_format_word3_check PRIVATE cxx_std_17)
 add_test(NAME startup_buffer_format_word3 COMMAND startup_buffer_format_word3_check)
 add_test(NAME startup_buffer_format_word3_mapping_control COMMAND startup_buffer_format_word3_check --mutate mapping)
 set_tests_properties(startup_buffer_format_word3_mapping_control PROPERTIES WILL_FAIL TRUE)
-foreach(mutation IN ITEMS height exact-fit first-32)
-    add_test(NAME startup_memory_srv_buffer_${mutation}_control COMMAND startup_memory_srv_buffer_check --mutate ${mutation})
-    set_tests_properties(startup_memory_srv_buffer_${mutation}_control PROPERTIES WILL_FAIL TRUE)
-endforeach()
 # Acceleration-structure memory SRV validation for device slot 70 (src/startup_stubs/memory_srv_as.h); the
 # mutated runs are negative controls.
 add_executable(startup_memory_srv_as_check tests/startup_memory_srv_as_check.cpp)

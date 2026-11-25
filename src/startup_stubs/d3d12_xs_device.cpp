@@ -943,6 +943,7 @@ void retire_note_submission(ID3D12CommandQueue* queue, const std::vector<Wrapper
 void drain_retired_resources();
 void drop_mesh_lease_owner(Wrapper* w);
 void discard_mesh_lease_recording(ID3D12CommandList* list);
+void clear_unplaced_buffers(Wrapper* device);
 ULONG __stdcall release(Wrapper* self)
 {
     const auto refs = InterlockedDecrement(&self->own().refs);
@@ -960,6 +961,8 @@ ULONG __stdcall release(Wrapper* self)
             retire_drop_recording(self);
         }
         if (self->own().retire_when_idle) retire_resource(self);
+        if (self->own().kind == device_kind)
+            clear_unplaced_buffers(self);
     }
     return static_cast<ULONG>(refs);
 }
