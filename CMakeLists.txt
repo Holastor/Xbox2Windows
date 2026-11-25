@@ -1483,6 +1483,16 @@ foreach(backend IN ITEMS warp hardware)
         ENVIRONMENT "X2W_D3D12_PERMISSIVE=1;X2W_D3D12_LIST_NOOP=1;X2W_D3D12_RENDER=1;X2W_D3D12_DEBUG=1")
 endforeach()
 
+# Resource slot 10: GetDesc on console resource wrappers.
+add_executable(startup_resource_desc tests/startup_resource_desc.cpp)
+target_compile_features(startup_resource_desc PRIVATE cxx_std_17)
+target_link_libraries(startup_resource_desc PRIVATE d3d12_xs_shim d3d12 dxgi)
+foreach(backend IN ITEMS warp hardware)
+    add_test(NAME startup_resource_desc_${backend} COMMAND startup_resource_desc ${backend})
+    set_tests_properties(startup_resource_desc_${backend} PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77
+        ENVIRONMENT "X2W_D3D12_PERMISSIVE=1;X2W_D3D12_LIST_NOOP=1;X2W_D3D12_RENDER=1;X2W_D3D12_DEBUG=1")
+endforeach()
+
 add_executable(startup_nv12_draw tests/startup_nv12_draw.cpp tests/desktop_gpu.cpp)
 target_compile_features(startup_nv12_draw PRIVATE cxx_std_17)
 target_include_directories(startup_nv12_draw PRIVATE src)
