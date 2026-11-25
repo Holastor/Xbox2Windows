@@ -294,6 +294,7 @@ void clear_unplaced_buffers(Wrapper* device)
 
 Wrapper* unplaced_memory_buffer(Wrapper* device, u64 address, u64 span_bytes, const D3D12_RESOURCE_DESC& requested_desc)
 {
+    if (address_resource_overlap(address, span_bytes)) return nullptr;
     u64 page_start = 0, page_span = 0;
     if (!x2w_startup::unplaced_buffer_extent(address, span_bytes, page_start, page_span))
         return nullptr;
