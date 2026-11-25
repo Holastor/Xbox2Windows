@@ -706,11 +706,11 @@ def check_rejections(original_path):
     ret_ins = Instruction.create(Code.RETNQ)
 
     # 1) VEX.L=1 (256-bit) packed-integer encodings of surviving forms must be rejected explicitly (AVX2, not AVX1).
-    # The 256-bit add, subtract, compare, minimum, maximum, absolute value, sign and word shuffle forms
-    # are lowered and are covered by avx_int_ymm_addsub_check.py, avx_int_ymm_minmax_check.py and
-    # avx_int_ymm_abs_sign_shuf_check.py.
+    # The 256-bit add, subtract, saturating add and subtract, compare, minimum, maximum, absolute value,
+    # sign and word shuffle forms are lowered and are covered by avx_int_ymm_addsub_check.py,
+    # avx_int_ymm_sat_check.py, avx_int_ymm_minmax_check.py and avx_int_ymm_abs_sign_shuf_check.py.
     vex256_int_cases = [
-        ("vpaddsb_ymm", Instruction.create_reg_reg_reg(Code.VEX_VPADDSB_YMM_YMM_YMMM256, R.YMM0, R.YMM1, R.YMM2)),
+        ("vpackusdw_ymm", Instruction.create_reg_reg_reg(Code.VEX_VPACKUSDW_YMM_YMM_YMMM256, R.YMM0, R.YMM1, R.YMM2)),
         ("vpackssdw_ymm", Instruction.create_reg_reg_reg(Code.VEX_VPACKSSDW_YMM_YMM_YMMM256, R.YMM0, R.YMM1, R.YMM2)),
         ("vpalignr_ymm", Instruction.create_reg_reg_reg_u32(Code.VEX_VPALIGNR_YMM_YMM_YMMM256_IMM8, R.YMM0, R.YMM1, R.YMM2, 4)),
         ("vpblendvb_ymm", Instruction.create_reg_reg_reg_reg(Code.VEX_VPBLENDVB_YMM_YMM_YMMM256_YMM, R.YMM0, R.YMM1, R.YMM2, R.YMM3)),
@@ -924,7 +924,7 @@ def check_rejections(original_path):
         max_len = orig_end - entry
 
     pe_patches = [
-        ("pe_vpaddsb_ymm", encode_seq(ld_ymm1, ld_ymm2, vex256_by_label["vpaddsb_ymm"], ret_ins),
+        ("pe_vpackusdw_ymm", encode_seq(ld_ymm1, ld_ymm2, vex256_by_label["vpackusdw_ymm"], ret_ins),
          "unsupported VEX.256 (L=1) packed-integer encoding"),
         ("pe_vpslld_ymm_xmm", encode_seq(ld_ymm1, ld_xmm2, vex256_by_label["vpslld_ymm_xmm"], ret_ins),
          "unsupported VEX.256 (L=1) packed-integer encoding"),

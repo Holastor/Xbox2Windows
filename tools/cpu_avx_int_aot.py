@@ -32,6 +32,9 @@ excluding the 28 forms carved out to cpu_vex_aot.py (PR #325)):
     destination are written.
   - 256-bit (VEX.L=1, AVX2, register operands only) min / max: vpmaxsb/sw/sd/ub/uw/ud,
     vpminsb/sw/sd/ub/uw/ud. The 128-bit vpmaxsw and vpminsw encodings stay with cpu_vex_aot.py.
+  - 256-bit (VEX.L=1, AVX2, register operands only) saturating add / subtract: vpaddsb/sw/usb/usw,
+    vpsubsb/sw/usb/usw (destination = first source - second source). The 128-bit vpaddsw
+    encoding stays with cpu_vex_aot.py.
 
 Transport/ABI glue: vmovdqu (128/256-bit flat load, store and register copy),
 flat 32/64-bit GPR load/store mov for scratch GPRs, and terminal ret.
@@ -82,6 +85,8 @@ WIDE_BINARY_HELPERS = {
         "vpmaxsb", "vpmaxsw", "vpmaxsd", "vpmaxub", "vpmaxuw", "vpmaxud",
         "vpminsb", "vpminsw", "vpminsd", "vpminub", "vpminuw", "vpminud",
         "vpsignb", "vpsignw", "vpsignd",
+        "vpaddsb", "vpaddsw", "vpaddusb", "vpaddusw",
+        "vpsubsb", "vpsubsw", "vpsubusb", "vpsubusw",
     )
 }
 WIDE_BINARY_CODES = {
@@ -94,6 +99,8 @@ WIDE_BINARY_CODES = {
         "VPMAXSB", "VPMAXSW", "VPMAXSD", "VPMAXUB", "VPMAXUW", "VPMAXUD",
         "VPMINSB", "VPMINSW", "VPMINSD", "VPMINUB", "VPMINUW", "VPMINUD",
         "VPSIGNB", "VPSIGNW", "VPSIGND",
+        "VPADDSB", "VPADDSW", "VPADDUSB", "VPADDUSW",
+        "VPSUBSB", "VPSUBSW", "VPSUBUSB", "VPSUBUSW",
     )
 }
 # 256-bit one-source forms: the 128-bit helper runs on each half. vpshufhw/vpshuflw use the
@@ -572,6 +579,13 @@ static Vec256 op_vpaddq(const Vec256& a, const Vec256& b) {
 static Vec256 op_vpaddsb(const Vec256& a, const Vec256& b) {
     Vec256 out{};
     for (unsigned i = 0; i < 16u; ++i) set_lane8(out, i, sat_s8(static_cast<std::int32_t>(s8(lane8(a, i))) + s8(lane8(b, i))));
+    return out;
+}
+
+// The 128-bit vpaddsw encoding stays with cpu_vex_aot.py; this helper only serves the 256-bit form.
+static Vec256 op_vpaddsw(const Vec256& a, const Vec256& b) {
+    Vec256 out{};
+    for (unsigned i = 0; i < 8u; ++i) set_lane16(out, i, sat_s16(static_cast<std::int32_t>(s16(lane16(a, i))) + s16(lane16(b, i))));
     return out;
 }
 

@@ -113,6 +113,71 @@ class BCPackTablesCheck(unittest.TestCase):
                 self.assertGreaterEqual(mask, 0)
                 self.assertLessEqual(mask, 0xFFFFFFFF)
 
+    def test_bc4_tables_structure(self):
+        pairs = extract_array(self.text, "RANK_PAIR_BC4")
+        self.assertEqual(len(pairs), 64)
+        for row in pairs:
+            self.assertEqual(len(row), 2)
+            for v in row:
+                self.assertIn(v, range(8))
+
+        dictionary = extract_array(self.text, "BC4_DICTIONARY")
+        self.assertEqual(len(dictionary), 255)
+        for ep, ix in dictionary:
+            self.assertEqual(len(ep), 2)
+            for b in ep:
+                self.assertIn(b, range(256))
+            self.assertEqual(len(ix), 16)
+            for idx in ix:
+                self.assertIn(idx, range(8))
+
+    def test_bc5_tables_structure(self):
+        pairs = extract_array(self.text, "RANK_PAIR_BC5")
+        self.assertEqual(len(pairs), 64)
+        for row in pairs:
+            self.assertEqual(len(row), 2)
+            for v in row:
+                self.assertIn(v, range(8))
+
+        dictionary = extract_array(self.text, "BC5_DICTIONARY")
+        self.assertEqual(len(dictionary), 255)
+        for ep, ix in dictionary:
+            self.assertEqual(len(ep), 4)
+            for b in ep:
+                self.assertIn(b, range(256))
+            self.assertEqual(len(ix), 32)
+            for idx in ix:
+                self.assertIn(idx, range(8))
+
+    def test_bc3_tables_structure(self):
+        pairs = extract_array(self.text, "RANK_PAIR_BC3_ALPHA")
+        self.assertEqual(len(pairs), 64)
+        for row in pairs:
+            self.assertEqual(len(row), 2)
+            for v in row:
+                self.assertIn(v, range(8))
+
+        quads = extract_array(self.text, "RANK_QUAD_BC3_COLOUR")
+        self.assertEqual(len(quads), 256)
+        for row in quads:
+            self.assertEqual(len(row), 4)
+            for v in row:
+                self.assertIn(v, range(4))
+
+        dictionary = extract_array(self.text, "BC3_DICTIONARY")
+        self.assertEqual(len(dictionary), 255)
+        for ep, ix in dictionary:
+            self.assertEqual(len(ep), 8)
+            for b in ep[0:2]:
+                self.assertIn(b, range(256))
+            for idx, b in enumerate(ep[2:8]):
+                self.assertIn(b, range(64 if (idx % 3) == 1 else 32))
+            self.assertEqual(len(ix), 32)
+            for idx in ix[0:16]:
+                self.assertIn(idx, range(8))
+            for idx in ix[16:32]:
+                self.assertIn(idx, range(4))
+
     def test_compare_with_reference_data_if_present(self):
         if not (REF_DATA / "bc7.json").exists():
             self.skipTest("Reference JSON data in out/bcpack-rs/data not present")

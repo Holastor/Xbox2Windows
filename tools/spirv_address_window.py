@@ -11,7 +11,7 @@ from spirv_sampler_views import split_sampler_views
 
 
 ID = r"%[A-Za-z0-9_]+"
-CAST = re.compile(rf"({ID}) = OpConvertUToPtr %_ptr_PSB_(arr64|arri|arrf|arr|ulong|uint|int|float) ({ID})")
+CAST = re.compile(rf"({ID}) = OpConvertUToPtr %_ptr_PSB_(arr64|arri|arrf|arrv4f|arr|ulong|uint|int|float|v4float) ({ID})")
 ACCESS = re.compile(rf"({ID}) = OpAccessChain %_ptr_PSB_uint ({ID}) ({ID})")
 SIGNED_ACCESS = re.compile(rf"({ID}) = OpAccessChain %_ptr_PSB_int ({ID}) ({ID})")
 SIGNED_POINTER_TYPES = ("%_ptr_PSB_int = OpTypePointer PhysicalStorageBuffer %int",
@@ -26,6 +26,14 @@ FLOAT_ARRAY_DECLARATIONS = ("%float = OpTypeFloat 32", "%rt_float = OpTypeRuntim
                             "OpDecorate %rt_float ArrayStride 4")
 # A float access is a plain load or store of one naturally aligned 32-bit value; atomics are not offered on floats.
 FLOAT_MEMORY_OPERANDS = ([], ["Aligned", "4"])
+VEC4_ACCESS = re.compile(rf"({ID}) = OpAccessChain %_ptr_PSB_v4float ({ID}) ({ID})")
+VEC4_POINTER_TYPES = ("%_ptr_PSB_v4float = OpTypePointer PhysicalStorageBuffer %v4float",
+                      "%_ptr_PSB_arrv4f = OpTypePointer PhysicalStorageBuffer %rt_v4float")
+VEC4_ARRAY_DECLARATIONS = ("%float = OpTypeFloat 32", "%v4float = OpTypeVector %float 4",
+                           "%rt_v4float = OpTypeRuntimeArray %v4float", "OpDecorate %rt_v4float ArrayStride 16")
+# A four-float access is a plain load or store of one naturally aligned 16-byte value. Physical accesses must carry
+# an Aligned operand, and only the natural alignment is accepted, as for a QWORD; other vector types are not lowered.
+VEC4_MEMORY_OPERANDS = (["Aligned", "16"],)
 CONSTANT = re.compile(rf"({ID}) = OpConstant %uint (\d+)")
 SIGNED_ATOMICS = {"OpAtomicSMin": "OpSLessThan", "OpAtomicSMax": "OpSGreaterThan"}
 # Atomics with no signedness, by operand count after the result type; their operands are bit-cast to unsigned.
@@ -59,11 +67,12 @@ def word_pointer(dst, base, index, wide=False, defer=False):
     """Select the last DWORD offset for an unaligned or unrepresentable address.
 
     Returns the lines and the ID of the boolean that is true only for an aligned, in-window address.
-    A wide (QWORD) or deferred pointer selects no substitute: it defines only the DWORD index {address}_word, and
-    the access issues in a branch taken for a valid address."""
+    A wide (QWORD, or "vec4" for sixteen bytes) or deferred pointer selects no substitute: it defines only the DWORD
+    index {address}_word, and the access issues in a branch taken for a valid address. A sixteen-byte access ends
+    twelve bytes before the window end, so that all four of its DWORDs are inside the window."""
     name = address_name(dst)
-    scale, mask, end = ("%x2w_shift_wide", "%x2w_mask_wide", "%x2w_end_wide") if wide else (
-        "%x2w_shift", "%x2w_mask", "%x2w_end")
+    scale, mask, end = ("%x2w_shift_vec4", "%x2w_mask_vec4", "%x2w_end_vec4") if wide == "vec4" else (
+        "%x2w_shift_wide", "%x2w_mask_wide", "%x2w_end_wide") if wide else ("%x2w_shift", "%x2w_mask", "%x2w_end")
     lines = []
     addr = base
     if index:
@@ -246,6 +255,44 @@ def float_access(fields, pointers, valid_of, words, label, stem):
     return lines, stem + "_merge"
 
 
+def vec4_access(fields, pointers, valid_of, words, label, stem):
+    """Lower a four-float load or store into four DWORD accesses inside one branch taken only for a valid address.
+
+    The branch condition covers all sixteen bytes, so the four DWORDs are all accessed or none is. A load bit-casts
+    each word to a float and builds the vector; a store extracts each lane and bit-casts it to a word. Outside the
+    branch a load yields the zero vector (the bit pattern zero in every lane) and a store changes nothing.
+    Returns the lines and the label that follows."""
+    store = fields[0] == "OpStore"
+    pointer = fields[1] if store else fields[4]
+    operands = fields[3:] if store else fields[5:]
+    if store:
+        shape = len(fields) >= 3 and operands in VEC4_MEMORY_OPERANDS and fields[2] not in pointers
+    else:
+        shape = fields[1:4] == ["=", "OpLoad", "%v4float"] and fields[4:5] and operands in VEC4_MEMORY_OPERANDS
+    if not shape or pointer not in pointers or len(pointers) != 1:
+        raise ValueError("unhandled physical word pointer use")
+    word = words[pointer]
+    lines = [f"OpSelectionMerge {stem}_merge None", f"OpBranchConditional {valid_of[pointer]} {stem}_issue {stem}_merge",
+             f"{stem}_issue = OpLabel", f"{stem}_word_1 = OpIAdd %uint {word} %x2w_one",
+             f"{stem}_word_2 = OpIAdd %uint {word} %x2w_two", f"{stem}_word_3 = OpIAdd %uint {word} %x2w_three"]
+    lines.extend(f"{stem}_ptr_{lane} = OpAccessChain %_ptr_PSB_uint %x2w_heap %c0 {word if lane == 0 else f'{stem}_word_{lane}'}"
+                 for lane in range(4))
+    if store:
+        for lane in range(4):
+            lines.extend([f"{stem}_lane_{lane} = OpCompositeExtract %float {fields[2]} {lane}",
+                          f"{stem}_bits_{lane} = OpBitcast %uint {stem}_lane_{lane}",
+                          f"OpStore {stem}_ptr_{lane} {stem}_bits_{lane} Aligned 4"])
+        lines.extend([f"OpBranch {stem}_merge", f"{stem}_merge = OpLabel"])
+        return lines, stem + "_merge"
+    for lane in range(4):
+        lines.extend([f"{stem}_bits_{lane} = OpLoad %uint {stem}_ptr_{lane}",
+                      f"{stem}_lane_{lane} = OpBitcast %float {stem}_bits_{lane}"])
+    lines.extend([f"{stem}_value = OpCompositeConstruct %v4float {' '.join(f'{stem}_lane_{lane}' for lane in range(4))}",
+                  f"OpBranch {stem}_merge", f"{stem}_merge = OpLabel",
+                  f"{fields[0]} = OpPhi %v4float {stem}_value {stem}_issue %x2w_vec4_zero {label}"])
+    return lines, stem + "_merge"
+
+
 def merge_pointer_types(lines):
     # The push-constant and physical pointer types can become the same logical
     # pointer type. SPIR-V validation requires a single such declaration.
@@ -307,6 +354,7 @@ def lower(assembly):
     physical_qwords = set()
     physical_ints = set()
     physical_floats = set()
+    physical_vec4s = set()
     for line in lines:
         cast = CAST.fullmatch(line)
         access = ACCESS.fullmatch(line)
@@ -315,6 +363,8 @@ def lower(assembly):
             physical_ints.add((cast or SIGNED_ACCESS.fullmatch(line))[1])
         if cast and cast[2] == "float" or FLOAT_ACCESS.fullmatch(line):
             physical_floats.add((cast or FLOAT_ACCESS.fullmatch(line))[1])
+        if cast and cast[2] == "v4float" or VEC4_ACCESS.fullmatch(line):
+            physical_vec4s.add((cast or VEC4_ACCESS.fullmatch(line))[1])
         if access or cast and cast[2] == "uint":
             physical_words.add((access or cast)[1])
         if wide or cast and cast[2] == "ulong":
@@ -335,11 +385,25 @@ def lower(assembly):
     if physical_floats or any(cast and cast[2] == "arrf" for cast in map(CAST.fullmatch, lines)):
         if not set(FLOAT_POINTER_TYPES + FLOAT_ARRAY_DECLARATIONS) <= set(lines):
             raise ValueError("unsupported physical pointer or scalar layout")
+    vec4_arrays = {}
+    vec4_words = {}
+    vec4_stores = 0
+    uses_vec4 = bool(physical_vec4s) or any(cast and cast[2] == "arrv4f" for cast in map(CAST.fullmatch, lines))
+    if uses_vec4 and not set(VEC4_POINTER_TYPES + VEC4_ARRAY_DECLARATIONS) <= set(lines):
+        raise ValueError("unsupported physical pointer or scalar layout")
     if physical_qwords:
         declarations += ["%x2w_one = OpConstant %uint 1", "%x2w_shift_wide = OpConstant %uint 3",
                          "%x2w_shift_half = OpConstant %uint 32", "%x2w_mask_wide = OpConstant %ulong 7",
                          # The last valid QWORD ends at the same DWORD as the last valid DWORD access.
                          "%x2w_end_wide = OpConstant %ulong 4294967288"]
+    if uses_vec4:
+        # A 16-byte access is valid up to the last aligned address whose final DWORD is below the window end, so the
+        # end is the window end less twelve; a misaligned or straddling access is refused as a whole.
+        declarations += ["%x2w_shift_vec4 = OpConstant %uint 4", "%x2w_mask_vec4 = OpConstant %ulong 15",
+                         "%x2w_end_vec4 = OpConstant %ulong 4294967280", "%x2w_two = OpConstant %uint 2",
+                         "%x2w_three = OpConstant %uint 3", "%x2w_vec4_zero = OpConstantNull %v4float"]
+        if not physical_qwords:
+            declarations.append("%x2w_one = OpConstant %uint 1")
     # A guarded access splits its block, which would strand an OpLoopMerge in the generated merge block.
     loop_headers, start = set(), 0
     for number, line in enumerate(lines):
@@ -359,7 +423,8 @@ def lower(assembly):
     for number, line in enumerate(lines):
         if line in ('OpExtension "SPV_KHR_physical_storage_buffer"', "OpCapability PhysicalStorageBufferAddresses",
                     "%_ptr_PSB_arr = OpTypePointer PhysicalStorageBuffer %rt_uint",
-                    WIDE_POINTER_TYPE, WIDE_ARRAY_POINTER_TYPE, *SIGNED_POINTER_TYPES, *FLOAT_POINTER_TYPES):
+                    WIDE_POINTER_TYPE, WIDE_ARRAY_POINTER_TYPE, *SIGNED_POINTER_TYPES, *FLOAT_POINTER_TYPES,
+                    *VEC4_POINTER_TYPES):
             continue
         if line.startswith("OpDecorate ") and annotations:
             output.extend(annotations)
@@ -377,6 +442,12 @@ def lower(assembly):
                 signed_arrays[dst] = addr
             elif kind == "arrf":
                 float_arrays[dst] = addr
+            elif kind == "arrv4f":
+                vec4_arrays[dst] = addr
+            elif kind == "v4float":
+                new, valid_of[dst] = word_pointer(dst, addr, None, "vec4")
+                vec4_words[dst] = address_name(dst) + "_word"
+                output.extend(new)
             elif kind == "float":
                 new, valid_of[dst] = word_pointer(dst, addr, None, defer=True)
                 float_words[dst] = address_name(dst) + "_word"
@@ -416,6 +487,14 @@ def lower(assembly):
             float_words[dst] = address_name(dst) + "_word"
             output.extend(new)
             continue
+        if quad := VEC4_ACCESS.fullmatch(line):
+            dst, pointer, index = quad.groups()
+            if pointer not in vec4_arrays:
+                raise ValueError("unknown physical array pointer")
+            new, valid_of[dst] = word_pointer(dst, vec4_arrays[pointer], index, "vec4")
+            vec4_words[dst] = address_name(dst) + "_word"
+            output.extend(new)
+            continue
         if wide := WIDE_ACCESS.fullmatch(line):
             dst, pointer, index = wide.groups()
             if pointer not in wide_arrays:
@@ -428,7 +507,7 @@ def lower(assembly):
             label = origin = opened[1]
         ids = set(re.findall(ID, line))
         wide_used = ids & physical_qwords
-        if (wide_used or ids & (physical_ints | physical_floats)) and number in loop_headers:
+        if (wide_used or ids & (physical_ints | physical_floats | physical_vec4s)) and number in loop_headers:
             raise ValueError("a guarded physical access cannot share a block with OpLoopMerge")
         if wide_used:
             fields = line.split()
@@ -443,6 +522,16 @@ def lower(assembly):
             pointer = fields[4] if wide_load else fields[1]
             stem = "%x2w_" + (f"load_{fields[0][1:]}" if wide_load else f"store_{wide_accesses}")
             new, label = wide_access(kind, stem, valid_of[pointer], label, wide_words[pointer], fields)
+            final_label[origin] = label
+            output.extend(new)
+            continue
+        if ids & physical_vec4s:
+            if ids & (physical_words | physical_qwords | physical_ints | physical_floats):
+                raise ValueError("unhandled physical word pointer use")
+            fields = line.split()
+            vec4_stores += fields[0] == "OpStore"
+            stem = "%x2w_vec4_" + (f"result_{fields[0][1:]}" if fields[0] != "OpStore" else f"store_{vec4_stores}")
+            new, label = vec4_access(fields, ids & physical_vec4s, valid_of, vec4_words, label, stem)
             final_label[origin] = label
             output.extend(new)
             continue
@@ -508,7 +597,7 @@ def lower(assembly):
                 raise ValueError("unrecognized push-constant declaration")
             line = line.replace("PushConstant", "StorageBuffer")
         elif any(word in line for word in ("PhysicalStorageBuffer", "OpConvertUToPtr", "OpConvertPtrToU", "%_ptr_PSB_arr",
-                                                  "%_ptr_PSB_float")):
+                                                  "%_ptr_PSB_float", "%_ptr_PSB_v4float")):
             raise ValueError("unhandled physical pointer operation")
         if " = OpPhi " in line:
             source_phis.append(len(output))

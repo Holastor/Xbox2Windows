@@ -119,10 +119,27 @@ LEVEL_PROGRAM = (
     .replace("v_mul_legacy_f32_e32 v11, s3, v10", "v_mul_legacy_f32_e32 v11, s3, v12")
     .splitlines()
 )
+# The biased sample takes the bias from the first address register, ahead of the
+# two coordinates (bias, s, t), so the interpolated pair moves up one register
+# and the buffered float is copied into v8. LLVM's own lowering of the
+# image.sample.b intrinsic puts its bias argument in that first register.
+BIAS_MOVE = "v_mov_b32_e32 v8, s5"
+BIAS_SAMPLE_LINE = (
+    "image_sample_b v12, v[8:10], s[64:71], s[60:63] dmask:0x8 dim:SQ_RSRC_IMG_2D"
+)
+BIAS_PROGRAM = (
+    "\n".join(LEVEL_PROGRAM)
+    .replace(LEVEL_MOVE, BIAS_MOVE)
+    .replace("v9, v", "v10, v")
+    .replace("v8, v", "v9, v")
+    .replace(LEVEL_SAMPLE_LINE, BIAS_SAMPLE_LINE)
+    .splitlines()
+)
 PROGRAMS = [
     PROGRAM,
     LZ_PROGRAM,
     LEVEL_PROGRAM,
+    BIAS_PROGRAM,
     *OP_PROGRAMS.values(),
     *E64_PROGRAMS.values(),
     *MIXED_PROGRAMS.values(),
@@ -245,6 +262,7 @@ def controls():
     spelling_controls()
     sample_lz_controls()
     sample_level_controls()
+    sample_bias_controls()
 
     wrong_quad_source = source.replace(
         "s_wqm_b64 s[54:55], s[48:49]", "s_wqm_b64 s[54:55], s[52:53]"
@@ -382,12 +400,20 @@ SAMPLE_REFUSED = (
 def sample_refusals(assembled_only=False):
     # (opcode, program, expected message) for each refused rewrite.
     rows = []
-    for op in ("image_sample", "image_sample_lz", "image_sample_l"):
-        level = op == "image_sample_l"
-        base = "\n".join(
-            LEVEL_PROGRAM if level else PROGRAM if op == "image_sample" else LZ_PROGRAM
+    extra = {
+        "image_sample_l": (LEVEL_PROGRAM, LEVEL_SAMPLE_LINE),
+        "image_sample_b": (BIAS_PROGRAM, BIAS_SAMPLE_LINE),
+    }
+    for op in ("image_sample", "image_sample_lz", "image_sample_l", "image_sample_b"):
+        level = op in extra
+        program, line = extra.get(
+            op,
+            (
+                PROGRAM if op == "image_sample" else LZ_PROGRAM,
+                SAMPLE_LINE.replace("image_sample", op, 1),
+            ),
         )
-        line = LEVEL_SAMPLE_LINE if level else SAMPLE_LINE.replace("image_sample", op, 1)
+        base = "\n".join(program)
         for template in SAMPLE_REFUSED[: -2 if assembled_only else None]:
             text = template.format(op=op)
             if level:
@@ -449,7 +475,7 @@ LEVEL_CONSTANTS = [k + 0.25 for k in range(64)]
 def level_of(source):
     # The level a lowered program passes, evaluated against LEVEL_CONSTANTS by a
     # separate reader of the HLSL, not by the translator's word arithmetic.
-    call = re.search(r"SampleLevel\(samp,uv,([^)]*)\)", source)
+    call = re.search(r"Sample(?:Level|Bias)\(samp,uv,([^)]*)\)", source)
     assert call, source
     word = re.fullmatch(r"params\[(\d+)\]\.([xyzw])", call[1])
     if word:
@@ -457,8 +483,8 @@ def level_of(source):
     return float(call[1])
 
 
-def level_variant(*replacements):
-    source = "\n".join(LEVEL_PROGRAM)
+def level_variant(*replacements, program=LEVEL_PROGRAM):
+    source = "\n".join(program)
     for old, new in replacements:
         assert source.count(old) == 1, old
         source = source.replace(old, new)
@@ -552,6 +578,110 @@ def sample_level_controls():
         reject_with(lines, message)
 
 
+def bias_refusals():
+    # (text, program, message): the bias must be a buffered float copied into the
+    # first address register before the sample, with the load waited for.
+    wait = "s_waitcnt lgkmcnt(0)\n" + BIAS_MOVE
+    rows = [
+        ("no bias move", bias_variant((BIAS_MOVE + "\n", "")), "Unresolved sample level"),
+        (
+            "bias in the wrong register",
+            bias_variant((BIAS_MOVE, "v_mov_b32_e32 v11, s5")),
+            "Unresolved sample level",
+        ),
+        (
+            "bias before the load wait",
+            bias_variant((wait, BIAS_MOVE + "\ns_waitcnt lgkmcnt(0)")),
+            "Scalar load consumed before wait",
+        ),
+        (
+            "VOP3 move",
+            bias_variant((BIAS_MOVE, "v_mov_b32_e64 v8, s5")),
+            "Unsupported coverage instruction",
+        ),
+        (
+            "bias as the third register",
+            level_variant(
+                (LEVEL_SAMPLE_LINE, LEVEL_SAMPLE_LINE.replace("_l v12", "_b v12"))
+            ),
+            "Unresolved sample coordinates",
+        ),
+        (
+            "coordinates shifted past the bias",
+            bias_variant(("v[8:10]", "v[9:11]")),
+            "Unresolved sample coordinates",
+        ),
+    ]
+    for source in ("v9", "1.0", "0x40000000", "null", "vcc_lo"):
+        text = f"v_mov_b32_e32 v8, {source}"
+        rows.append((text, bias_variant((BIAS_MOVE, text)), "Unsupported move operands"))
+    rows.append(
+        (
+            "v_mov_b32_e32 v8, s7",
+            bias_variant((BIAS_MOVE, "v_mov_b32_e32 v8, s7")),
+            "Unresolved move source",
+        )
+    )
+    # The clamped and compare forms add a register or a value the lowering does
+    # not model, so they are refused by name.
+    for text in (
+        "image_sample_b_cl v12, v[8:11], s[64:71], s[60:63] dmask:0x8 dim:SQ_RSRC_IMG_2D",
+        "image_sample_c_b v12, v[8:11], s[64:71], s[60:63] dmask:0x8 dim:SQ_RSRC_IMG_2D",
+    ):
+        rows.append(
+            (text, bias_variant((BIAS_SAMPLE_LINE, text)), "Unsupported coverage instruction")
+        )
+    return rows
+
+
+def bias_variant(*replacements):
+    return level_variant(*replacements, program=BIAS_PROGRAM)
+
+
+def sample_bias_controls():
+    # The bias lowers to SampleBias with the bias read from the buffered word
+    # the program loads, on both textures, and never to Sample or SampleLevel.
+    for offset in (0, 4, 8, 12):
+        load = LEVEL_LOAD.replace("0xc", hex(offset))
+        program = bias_variant((LEVEL_LOAD, load))
+        for slot in range(2):
+            source = lower(decoded(program), bindings(slot))
+            assert f"tex{slot}.SampleBias(samp,uv,params[0]" in source and ").a;" in source
+            assert ".Sample(" not in source and "SampleLevel" not in source
+            assert level_of(source) == LEVEL_CONSTANTS[offset // 4], (offset, source)
+    biased = lower(decoded(BIAS_PROGRAM), bindings(0))
+    # The same registers read as a level or without an address register are other
+    # programs, so each wrong opcode is told apart from the biased one.
+    implicit = lower(
+        decoded(bias_variant((BIAS_SAMPLE_LINE, BIAS_SAMPLE_LINE.replace("_b v12, v[8:10]", " v12, v[9:10]")))),
+        bindings(0),
+    )
+    zero = lower(
+        decoded(bias_variant((BIAS_SAMPLE_LINE, BIAS_SAMPLE_LINE.replace("_b v12, v[8:10]", "_lz v12, v[9:10]")))),
+        bindings(0),
+    )
+    assert level_of(biased) == LEVEL_CONSTANTS[3]
+    assert "SampleBias" not in implicit and "SampleLevel" not in implicit
+    assert "SampleBias" not in zero and level_of(zero) == 0
+    # A bias copied from a different word is a different program, and the last
+    # move before the sample defines it.
+    other = lower(decoded(bias_variant((BIAS_MOVE, "v_mov_b32_e32 v8, s3"))), bindings(0))
+    assert level_of(other) == LEVEL_CONSTANTS[1] != level_of(biased)
+    again = bias_variant((BIAS_MOVE, BIAS_MOVE + "\nv_mov_b32_e32 v8, s3"))
+    assert level_of(lower(decoded(again), bindings(0))) == LEVEL_CONSTANTS[1]
+    red = [
+        line.replace("s_lshl_b32 s12, s6, 5", "s_lshl_b32 s12, s6, 8").replace(
+            "dmask:0x8", "dmask:0x1"
+        )
+        for line in BIAS_PROGRAM
+    ]
+    for slot in range(2):
+        source = lower(decoded(red), red_bindings(slot))
+        assert f"tex{slot}.SampleBias(samp,uv,params[0].w).r" in source
+    for _, lines, message in bias_refusals():
+        reject_with(lines, message)
+
+
 def binary(tmp, *tools):
     for program in PROGRAMS:
         binary_program(tmp, program, *tools)
@@ -561,8 +691,9 @@ def binary(tmp, *tools):
 
 
 def binary_levels(tmp, assembler, objcopy, library):
-    # The refused level programs, assembled and disassembled by the real LLVM.
-    for text, lines, _ in level_refusals():
+    # The refused level and bias programs, assembled and disassembled by the
+    # real LLVM.
+    for text, lines, _ in [*level_refusals(), *bias_refusals()]:
         refused(tmp, lines, text, assembler, objcopy, library)
 
 
@@ -834,6 +965,15 @@ if __name__ == "__main__":
                     tmp,
                     *sys.argv[1:],
                     [lower(decoded(LEVEL_PROGRAM), bindings(0))],
+                    1,
+                    6,
+                    level=3.0,
+                )
+                # A bias of 3 added to the only mip's level still selects mip 0.
+                or draw(
+                    tmp,
+                    *sys.argv[1:],
+                    [lower(decoded(BIAS_PROGRAM), bindings(0))],
                     1,
                     6,
                     level=3.0,

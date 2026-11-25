@@ -88,6 +88,53 @@ constexpr FloatCase float_cases[] = {
     {"float write straddling the end of the descriptor", {8, float_pi, 60, 0}},
 };
 
+// A vec4 case: base low, operand bits, destination byte address, base high. The shader loads a four-float vector directly
+// at the base (A) and another through an array index at base + 16 (B), builds M from the operand and lanes of both
+// (operand, B.z, A.y, A.x), then stores A at the destination, B at destination + 16 and M at destination + 32. Each
+// access is four bit-cast DWORDs under one guard: all four move or none does, so a lane-order error, a NaN payload
+// and a negative zero are visible, and a vector that is misaligned or crosses the window end never moves partly.
+struct Vec4Case {
+    const char* name;
+    std::array<UINT, 4> parameters;
+};
+
+constexpr UINT vec4_pi = 0x40490fdbu;
+constexpr UINT vec4_nan = 0xffc00001u;
+constexpr UINT vec4_negative_zero = 0x80000000u;
+// The production window ends at the last DWORD below 0xfffffffc; the narrow window ends at byte 44, inside the
+// 64-byte view and inside the vector at byte 32, so a guard that checked only a vector's first DWORD would show.
+constexpr uint64_t vec4_window_end = 0xfffffffcull;
+constexpr uint64_t vec4_narrow_window_end = 44;
+
+constexpr Vec4Case vec4_cases[] = {
+    {"vec4 aligned", {16, vec4_pi, 0, 0}},
+    {"vec4 NaN operand", {16, vec4_nan, 0, 0}},
+    {"vec4 negative zero operand", {16, vec4_negative_zero, 0, 0}},
+    {"vec4 base misaligned by 4", {20, vec4_pi, 0, 0}},
+    {"vec4 base misaligned by 8", {24, vec4_pi, 0, 0}},
+    {"vec4 base misaligned by 12", {28, vec4_pi, 0, 0}},
+    {"vec4 load in the last vector of the view", {32, vec4_pi, 0, 0}},
+    {"vec4 load across the end of the descriptor", {48, vec4_pi, 0, 0}},
+    {"vec4 last vector of the window", {0xffffffd0u, vec4_pi, 0, 0}},
+    {"vec4 straddling the end of the window", {0xffffffe0u, vec4_pi, 0, 0}},
+    {"vec4 starting at the end of the window", {0xfffffff0u, vec4_pi, 0, 0}},
+    {"vec4 index addition wraps", {0xfffffff0u, vec4_pi, 0, 0xffffffffu}},
+    {"vec4 misaligned write by 4", {16, vec4_pi, 4, 0}},
+    {"vec4 misaligned write by 8", {16, vec4_pi, 8, 0}},
+    {"vec4 misaligned write by 12", {16, vec4_pi, 12, 0}},
+    {"vec4 write beyond descriptor", {16, vec4_pi, 64, 0}},
+    {"vec4 write above the window", {16, vec4_pi, 0xfffffff0u, 0}},
+    {"vec4 write across the end of the descriptor", {16, vec4_pi, 48, 0}},
+};
+
+constexpr Vec4Case vec4_narrow_cases[] = {
+    {"narrow vec4 below the end", {0, vec4_pi, 0, 0}},
+    {"narrow vec4 load across the end", {16, vec4_pi, 0, 0}},
+    {"narrow vec4 load past the end", {32, vec4_pi, 0, 0}},
+    {"narrow vec4 store across the end", {0, vec4_pi, 16, 0}},
+    {"narrow vec4 store past the end", {0, vec4_pi, 48, 0}},
+};
+
 // A QWORD case: base low, source QWORD index, destination byte address, base high. The shader adds the index
 // scaled by eight to the base, loads a QWORD there, adds one and stores it at the destination address.
 struct QwordCase {
@@ -225,6 +272,41 @@ void apply_float_case(const FloatCase& test, std::array<UINT, 16>& words)
     for (uint64_t k = 0; k < 4; ++k) {
         const uint64_t address = static_cast<uint64_t>(test.parameters[2]) + 4 * k;
         if (address % 4 == 0 && address < 0xfffffffcull && address + 4 <= sizeof(words)) words[address / 4] = value[k];
+    }
+}
+
+// Four vectors of four distinct DWORDs. The second holds a quiet NaN with a payload, a negative zero, 1.5 and a negative
+// NaN, the third an ordinary number, -1.0, +infinity and the largest finite float, so a swapped lane is visible. The
+// first and fourth hold values that would be wrong to read.
+void init_vec4_arena(std::array<UINT, 16>& words)
+{
+    words = {0x11112222u, 0x33334444u, 0x55556666u, 0x77778888u, 0x7fc01234u, 0x80000000u, 0x3fc00000u, 0xffc0abcdu,
+             0x3f99999au, 0xbf800000u, 0x7f800000u, 0x7f7fffffu, arena_fill, arena_fill, arena_fill, arena_fill};
+}
+
+// Independent CPU model of the four-float accesses. A vector is used only when its address is a multiple of 16 and
+// all 16 bytes are below the window end, and for an indexed address the sum with the base does not wrap. The 64-byte
+// view then returns zero for a read past it and discards a write past it; an aligned vector never crosses the view.
+// All loads happen before any store, and a vector that was not used loads as four zero DWORDs.
+void apply_vec4_case(const Vec4Case& test, std::array<UINT, 16>& words, uint64_t window_end)
+{
+    const uint64_t base = (static_cast<uint64_t>(test.parameters[3]) << 32) | test.parameters[0];
+    const std::array<UINT, 16> source = words;
+    const auto usable = [window_end](uint64_t address, uint64_t anchor) {
+        return address >= anchor && address % 16 == 0 && address < window_end && window_end - address >= 16;
+    };
+    std::array<UINT, 4> value[3]{};
+    const uint64_t load_address[2] = {base, base + 16};
+    for (int k = 0; k < 2; ++k) {
+        if (usable(load_address[k], base) && load_address[k] + 16 <= sizeof(source))
+            std::memcpy(value[k].data(), reinterpret_cast<const BYTE*>(source.data()) + load_address[k], 16);
+    }
+    value[2] = {test.parameters[1], value[1][2], value[0][1], value[0][0]};
+    const uint64_t destination = test.parameters[2];
+    for (uint64_t k = 0; k < 3; ++k) {
+        const uint64_t address = destination + 16 * k;
+        if (usable(address, destination) && address + 16 <= sizeof(words))
+            std::memcpy(reinterpret_cast<BYTE*>(words.data()) + address, value[k].data(), 16);
     }
 }
 
@@ -367,6 +449,22 @@ void check_spirv_window_signed(ID3D12Device* device, const char* shader_path)
 void check_spirv_window_float(ID3D12Device* device, const char* shader_path)
 {
     check_window_cases(device, shader_path, float_cases, init_float_arena, apply_float_case);
+}
+
+void check_spirv_window_vec4(ID3D12Device* device, const char* shader_path)
+{
+    check_window_cases(device, shader_path, vec4_cases, init_vec4_arena,
+                       [](const Vec4Case& test, std::array<UINT, 16>& words) {
+                           apply_vec4_case(test, words, vec4_window_end);
+                       });
+}
+
+void check_spirv_window_vec4_narrow(ID3D12Device* device, const char* shader_path)
+{
+    check_window_cases(device, shader_path, vec4_narrow_cases, init_vec4_arena,
+                       [](const Vec4Case& test, std::array<UINT, 16>& words) {
+                           apply_vec4_case(test, words, vec4_narrow_window_end);
+                       });
 }
 
 void check_spirv_window_qword(ID3D12Device* device, const char* shader_path)

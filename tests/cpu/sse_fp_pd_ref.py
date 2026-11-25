@@ -173,6 +173,39 @@ def lane_sqrt(src, mode, quirk=None):
     return ((root_exp + 1023) << 52) | (whole - (1 << FRACTION_BITS))
 
 
+def cmp_lane(x, y, pred, mode=DEFAULT_MODE, quirk=None):
+    """The 64-bit mask CMPPD predicate 0..7 (EQ LT LE UNORD NEQ NLT NLE ORD) gives two bit patterns.
+
+    Written from the rules of the predicates, not from a host comparison: DAZ reads a denormal as a
+    zero of the same sign, any NaN makes the pair unordered (EQ LT LE false, UNORD NEQ NLT NLE true,
+    ORD false), and two ordered values compare by exact value so that +0 equals -0. FTZ plays no part:
+    a compare does not produce a number."""
+    if quirk != "ignore_daz":
+        x, y = flush_denormal(x, mode), flush_denormal(y, mode)
+    unordered = (is_nan(x) or is_nan(y)) and quirk != "nan_ordered"
+    kx, ky = (magnitude_key(x), magnitude_key(y)) if not (is_nan(x) or is_nan(y)) else (0, 0)
+    equal, less = (not unordered) and kx == ky, (not unordered) and kx < ky
+    if quirk == "zero_signed" and kx == ky == 0 and x != y:
+        equal, less = False, bool(x >> 63)
+    if quirk == "eq_for_neq" and pred == 4:
+        pred = 0
+    if quirk == "lt_for_le" and pred == 2:
+        pred = 1
+    if quirk == "swap_ord" and pred in (3, 7):
+        pred ^= 4
+    result = (
+        equal, less, less or equal, unordered, not equal, not less, not (less or equal), not unordered,
+    )[pred]
+    if quirk == "numeric":
+        return int(result)
+    return (0xFFFFFFFF if quirk == "mask32" else MASK64) if result else 0
+
+
+def compare(a16, b16, pred, mode=DEFAULT_MODE, quirk=None):
+    """Two mask lanes of one packed double compare on 16-byte operands."""
+    return [cmp_lane(p, q, pred, mode, quirk) for p, q in zip(lanes(a16), lanes(b16))]
+
+
 def lanes(buf):
     return [int.from_bytes(buf[i:i + 8], "little") for i in range(0, 16, 8)]
 

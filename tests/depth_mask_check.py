@@ -46,7 +46,7 @@ CMPX = {
 CMPX_CASES = ((7, 17 / 64), (29, 49 / 64))
 
 
-# One-source binary32 forms. rcp, rsq and sqrt are approximate in D3D, so each result is rounded to the nearest integer
+# One-source binary32 forms. rcp, rsq, sqrt, exp and log are approximate in D3D, so each result is rounded to the nearest integer
 # (add 0.5, floor) and scaled by v7. The input is one whose exact result is an integer, and it reaches the opcode
 # through a zero the compiler cannot prove (v7 - v7), so the opcode really runs. The other forms are exact and see
 # x = 4 * (v7 - 0.5), an odd multiple of 1/16: never a tie and never an integer. Each tuple ends with its HLSL.
@@ -54,11 +54,14 @@ APPROX = {
     "v_rcp_f32_e32": (0x3E000000, 8, "(1.0f / value{a})"),
     "v_rsq_f32_e32": (0x3E800000, 2, "rsqrt(value{a})"),
     "v_sqrt_f32_e32": (0x41100000, 3, "sqrt(value{a})"),
+    "v_exp_f32_e32": (0x40a00000, 32, "exp2(value{a})"),  # exp2(5) = 32; 5.0 is no inline constant
+    "v_log_f32_e32": (0x42000000, 5, "log2(value{a})"),  # log2(32) = 5
 }
 EXACT = {
     "v_floor_f32_e32": (math.floor, "floor(value{a})"),
     "v_trunc_f32_e32": (math.trunc, "trunc(value{a})"),
     "v_rndne_f32_e32": (round, "round(value{a})"),  # Python rounds a tie to even
+    "v_ceil_f32_e32": (math.ceil, "ceil(value{a})"),
 }
 UNARY = {**APPROX, **EXACT}
 # T < v6 discards. -0.5 tells the exact forms apart, 0.5 tells the approximate ones apart.

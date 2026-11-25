@@ -39,6 +39,11 @@ The full build, Windows runtime tests, D3D12 tests, MASM fixtures and GPU tests
 require x64 Windows with Visual Studio's Desktop development with C++ workload,
 the Windows SDK, CMake/Ninja, DXC and Python 3.11 or newer.
 
+`dxc_compile_time_gvn` measures pass attribution through `-ftime-report`, which
+arrived in DXC 1.7.2212 (December 2022). The 1.6 build that ships with Windows
+SDK 10.0.22621 has no such flag, so that test reports a capability skip (77)
+instead of failing.
+
 The Ubuntu CI job assembles and translates gfx1013 fixtures with LLVM 15. The
 pure-Python checks listed below also run on Linux and macOS. Do not stub D3D12,
 MASM or `cl` to make the CMake configure succeed on another platform.
@@ -100,6 +105,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -m pip install -r requirements-dev.txt
 ./out/pe-env/bin/python -B tests/script_state_check.py
 ./out/pe-env/bin/python -B tests/resource_root_check.py
+./out/pe-env/bin/python -B tests/pe_authentihash_check.py
 ./out/pe-env/bin/python -B tests/bcpack_check.py
 ./out/pe-env/bin/python -B tests/bcpack_symbols_check.py
 ./out/pe-env/bin/python -B tests/bcpack_tables_check.py
@@ -111,11 +117,13 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/resource_ranges_check.py
 ./out/pe-env/bin/python -B tests/ttpf_batch_export_check.py
 ./out/pe-env/bin/python -B tests/awc_metadata_check.py
+./out/pe-env/bin/python -B tests/startup_audio_timeline_check.py
 ./out/pe-env/bin/python -B tests/sgd5_effects_check.py
 ./out/pe-env/bin/python -B tests/dxcontainer_part_offsets_check.py
 ./out/pe-env/bin/python -B tests/layout_chunks_check.py
 ./out/pe-env/bin/python -B tests/dependency_paths_check.py
 ./out/pe-env/bin/python -B tests/pe_package_preflight_check.py
+./out/pe-env/bin/python -B tests/host_commit_check.py
 ./out/pe-env/bin/python -B tests/pe_package_ordinal_plan_check.py
 ./out/pe-env/bin/python -B tests/compat_report_check.py
 ./out/pe-env/bin/python -B tests/intake/paths_check.py
@@ -126,6 +134,7 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/shader_corpus_report_check.py
 ./out/pe-env/bin/python -B tests/dxil_retarget_check.py
 ./out/pe-env/bin/python -B tests/rdna2_tools_check.py
+./out/pe-env/bin/python -B tests/mesh_dynamic_geometry_check.py
 ./out/pe-env/bin/python -B tests/pso_readiness_check.py
 ./out/pe-env/bin/python -B tests/xmem_attribute_scan_check.py
 ./out/pe-env/bin/python -B tests/xgameruntime_table_check.py
@@ -135,10 +144,58 @@ python3 -m venv out/pe-env
 ./out/pe-env/bin/python -B tests/hardware_reports_check.py
 ./out/pe-env/bin/python -B tests/rectlist_topology_check.py
 ./out/pe-env/bin/python -B tests/startup_sampler_heap_check.py
+./out/pe-env/bin/python -B tests/startup_image_sample_l_check.py
 ./out/pe-env/bin/python -B tests/startup_image_3d_check.py
+./out/pe-env/bin/python -B tests/startup_image_load_mip_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_operand_count_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_mad_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_swap_check.py
+./out/pe-env/bin/python -B tests/startup_image_2d_array_check.py
+./out/pe-env/bin/python -B tests/startup_image_sample_a16_check.py
+./out/pe-env/bin/python -B tests/startup_image_load_d16_check.py
+./out/pe-env/bin/python -B tests/startup_host_cpu_check.py
+./out/pe-env/bin/python -B tests/startup_live_telemetry_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_capture_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_watch_check.py
 ./out/pe-env/bin/python -B tests/startup_translator_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_smem_offset_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_refusals_check.py
+./out/pe-env/bin/python -B tests/startup_compute_request_offline_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_scalar_m0_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_readfirstlane_uniform_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_sop2_complement_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_sdwa_cvt_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_sopk_accum_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_int_med3_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_cselect_mask_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_mask_overwrite_check.py
 ./out/pe-env/bin/python -B tests/startup_flat_param_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_root_check.py
 ./out/pe-env/bin/python -B tests/startup_inline_sampler_check.py
+./out/pe-env/bin/python -B tests/startup_buffer_address_check.py
+./out/pe-env/bin/python -B tests/startup_smem_address_check.py
+./out/pe-env/bin/python -B tests/startup_stream_fetch_check.py
+./out/pe-env/bin/python -B tests/startup_stream_interface_check.py
+./out/pe-env/bin/python -B tests/compute_alu_cmp_ne_check.py
+./out/pe-env/bin/python -B tests/compute_entry_layout_check.py
+./out/pe-env/bin/python -B tests/compute_alu_bcnt64_check.py
+./out/pe-env/bin/python -B tests/compute_load_format_check.py
+./out/pe-env/bin/python -B tests/startup_ngg_slice_check.py
+./out/pe-env/bin/python -B tests/mesh_dynamic_aot_check.py
+./out/pe-env/bin/python -B tests/mesh_lane_spill_check.py
+./out/pe-env/bin/python -B tests/startup_image_gather_lz_check.py
+./out/pe-env/bin/python -B tests/startup_image_sample_c_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_cvt_alu_check.py
+./out/pe-env/bin/python -B tests/startup_triage_run_check.py
+./out/pe-env/bin/python -B tests/startup_run_ps1_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_bit_alu_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_shift64_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_vopc_sdwa_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_f32_lg_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_f32_nan_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_sopk_signext_check.py
+./out/pe-env/bin/python -B tests/run_checks_parallel_check.py
+./out/pe-env/bin/python -B tests/startup_gfx2hlsl_handler_arity_check.py
 ```
 
 `tests/pixel_aot_check.py binary` additionally needs LLVM with gfx1013 support

@@ -1,7 +1,7 @@
 ; coverage: source cpu_aot_sse_fp_pd
 ; Source-built MASM fixture for the seven legacy SSE2 packed double arithmetic forms from
 ; docs/coverage/x64_zen2.tsv group SSE2: addpd, subpd, mulpd, divpd, minpd, maxpd and sqrtpd, each
-; with an xmm source and an aligned m128 source. Operands are loaded and stored with movaps.
+; with an xmm source and an aligned m128 source, and for the packed double compare cmppd. Operands are loaded and stored with movaps.
 ; Every export uses the Windows x64 leaf ABI:
 ;   RCX = const void* input_a (32 bytes, 16-byte aligned)
 ;   RDX = const void* input_b (32 bytes, 16-byte aligned; second vector at +16)
@@ -361,6 +361,149 @@ ENDIF
     movaps XMMWORD PTR [r8], xmm0
     ret
 op_sqrtpd_self ENDP
+
+; --- cmppd: the eight legacy predicates 0..7 on a register source, then aligned m128 and self forms.
+; Each result lane is an all-ones or all-zero 64-bit mask. ALTER_IMM assembles predicate (n xor 4).
+
+op_cmppd_0 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 4
+ELSE
+    cmppd xmm0, xmm1, 0
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_0 ENDP
+
+op_cmppd_1 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 5
+ELSE
+    cmppd xmm0, xmm1, 1
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_1 ENDP
+
+op_cmppd_2 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 6
+ELSE
+    cmppd xmm0, xmm1, 2
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_2 ENDP
+
+op_cmppd_3 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 7
+ELSE
+    cmppd xmm0, xmm1, 3
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_3 ENDP
+
+op_cmppd_4 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 0
+ELSE
+    cmppd xmm0, xmm1, 4
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_4 ENDP
+
+op_cmppd_5 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 1
+ELSE
+    cmppd xmm0, xmm1, 5
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_5 ENDP
+
+op_cmppd_6 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 2
+ELSE
+    cmppd xmm0, xmm1, 6
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_6 ENDP
+
+op_cmppd_7 PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+    movaps xmm1, XMMWORD PTR [rdx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm1, 3
+ELSE
+    cmppd xmm0, xmm1, 7
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_7 ENDP
+
+op_cmppd_mem PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+IFDEF ALTER_IMM
+    cmppd xmm0, XMMWORD PTR [rdx], 1
+ELSE
+    cmppd xmm0, XMMWORD PTR [rdx], 5
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_mem ENDP
+
+op_cmppd_mem_disp PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+IFDEF ALTER_IMM
+    cmppd xmm0, XMMWORD PTR [rdx+16], 6
+ELSE
+    cmppd xmm0, XMMWORD PTR [rdx+16], 2
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_mem_disp ENDP
+
+op_cmppd_self PROC FRAME
+    .endprolog
+    movaps xmm0, XMMWORD PTR [rcx]
+IFDEF ALTER_IMM
+    cmppd xmm0, xmm0, 4
+ELSE
+    cmppd xmm0, xmm0, 0
+ENDIF
+    movaps XMMWORD PTR [r8], xmm0
+    ret
+op_cmppd_self ENDP
 
 ; Chained arithmetic: every operation feeds the next through registers, with a memory
 ; source at +16 and a destination reused across instructions.

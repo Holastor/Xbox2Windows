@@ -9,6 +9,10 @@ struct StartupBc7Input {
     const char* blocks;
     std::uint32_t width, height;
     bool tiled;
+    // "resource format:resource flags:view format" in decimal, hex and decimal: instead of BC7 data,
+    // a texture of that description is created through slot 133, cleared through a render-target
+    // view of the view format and sampled through a shader-resource view of the view format.
+    const char* packed = nullptr;
 };
 
 int check_stream_draw(IDXGIAdapter* adapter, void* guest, void* pso, const char* pixels,

@@ -1,9 +1,10 @@
-"""Differential checks, mutation controls and rejection controls for packed double SSE2 arithmetic.
+"""Differential checks, mutation controls and rejection controls for packed double SSE2 arithmetic and compares.
 
 ADDPD, SUBPD, MULPD, DIVPD, MINPD, MAXPD and SQRTPD (xmm and aligned m128 sources) are run natively and
 through the translator in the default control word and under all sixteen combinations of MXCSR rounding
-mode, DAZ and FTZ, each against the exact reference in sse_fp_pd_ref.py. The packed single checks in
-sse_fp_check.py provide the buffer, driver and encoding helpers."""
+mode, DAZ and FTZ, each against the exact reference in sse_fp_pd_ref.py. CMPPD (predicates 0..7, xmm and
+aligned m128 sources) gets the same treatment against the predicate rules of that reference. The packed
+single checks in sse_fp_check.py provide the buffer, driver and encoding helpers."""
 
 from pathlib import Path
 import random
@@ -24,6 +25,9 @@ FILL = base.FILL
 OPS = ("add", "sub", "mul", "div", "min", "max", "sqrt")
 SUFFIXES = ("", "_mem", "_mem_disp", "_self")
 EXPORTS = tuple(f"op_{op}pd{suffix}" for op in OPS for suffix in SUFFIXES) + ("op_pd_pipeline",)
+CMP_EXPORTS = tuple(f"op_cmppd_{p}" for p in range(8)) + ("op_cmppd_mem", "op_cmppd_mem_disp", "op_cmppd_self")
+CMP_PREDICATE = {**{f"op_cmppd_{p}": p for p in range(8)}, "op_cmppd_mem": 5, "op_cmppd_mem_disp": 2,
+                 "op_cmppd_self": 0}
 # The ALTER_IMM build assembles these register forms with another operation.
 ALTERED_OP = {"add": "sub", "sub": "add", "mul": "div", "div": "mul", "min": "max", "max": "min",
               "sqrt": "add"}
@@ -82,6 +86,91 @@ def arith_reference(name, a, b, mode=ref.DEFAULT_MODE, altered=False, quirk=None
         source = b[16:32] if suffix == "_mem" else b[0:16]
     out[0:16], wild[0:16] = ref.pack(ref.apply(op, first, source, mode, quirk))
     return bytes(out), bytes(wild)
+
+
+def cmp_reference(name, a, b, mode=ref.DEFAULT_MODE, altered=False, quirk=None):
+    """Expected 32-byte output of a compare export: two 64-bit masks, the upper half keeps its fill.
+    The ALTER_IMM build assembles predicate (n xor 4)."""
+    pred = CMP_PREDICATE[name] ^ (4 if altered else 0)
+    source = {"op_cmppd_mem": b[0:16], "op_cmppd_mem_disp": b[16:32], "op_cmppd_self": a[0:16]}.get(name, b[0:16])
+    return pk_q(*ref.compare(a[0:16], source, pred, mode, quirk)) + FILL[16:]
+
+
+def check_cmp_differential(native_path, lifted_path, altered_path):
+    native = base.bind_exports(native_path, "", CMP_EXPORTS)
+    lifted = base.bind_exports(lifted_path, "lifted_", CMP_EXPORTS)
+    altered = base.bind_exports(altered_path, "lifted_", CMP_EXPORTS)
+    pairs = arith_pairs()
+    for name in CMP_EXPORTS:
+        diverged = 0
+        for idx, (a, b) in enumerate(pairs):
+            want = cmp_reference(name, a, b)
+            base.assert_equal_output("native", name, idx, base.invoke(native[name], a, b), want)
+            base.assert_equal_output("lifted", name, idx, base.invoke(lifted[name], a, b), want)
+            got_alt = base.invoke(altered[name], a, b)
+            base.assert_equal_output("altered", name, idx, got_alt, cmp_reference(name, a, b, altered=True))
+            diverged += got_alt != want
+        if not diverged:
+            raise AssertionError(f"altered control {name} did not diverge from original")
+    want = cmp_reference("op_cmppd_0", *pairs[0])
+    mutated = bytearray(want)
+    mutated[9] ^= 0x80
+    try:
+        base.assert_equal_output("mutation", "op_cmppd_0", 0, bytes(mutated), want)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("mutated compare mask was not caught by comparator")
+    print(f"{len(CMP_EXPORTS) * len(pairs)} native/lifted/reference packed double compare cases across "
+          f"{len(CMP_EXPORTS)} exports matched bit for bit; altered predicates diverged on every export")
+
+
+# Each wrong rule must disagree with the processor on some call in the given mode.
+CMP_QUIRKS = (
+    ("nan_ordered", "op_cmppd_3"), ("nan_ordered", "op_cmppd_7"), ("nan_ordered", "op_cmppd_0"),
+    ("zero_signed", "op_cmppd_0"), ("zero_signed", "op_cmppd_1"), ("eq_for_neq", "op_cmppd_4"),
+    ("lt_for_le", "op_cmppd_2"), ("swap_ord", "op_cmppd_3"), ("swap_ord", "op_cmppd_7"),
+    ("mask32", "op_cmppd_0"), ("numeric", "op_cmppd_5"), ("ignore_daz", "op_cmppd_0"),
+    ("ignore_daz", "op_cmppd_1"), ("ignore_daz", "op_cmppd_6"),
+)
+# UNORD and ORD only look at NaN, and a register compared with itself is equal to itself under any DAZ:
+# DAZ cannot change those exports. FTZ and rounding never matter to a compare.
+DAZ_BLIND = ("op_cmppd_3", "op_cmppd_7", "op_cmppd_self")
+
+
+def check_cmp_modes(native_path, lifted_path, harness_path):
+    driver = base.bind_mxcsr_driver(harness_path)
+    native = base.bind_exports(native_path, "", CMP_EXPORTS)
+    lifted = base.bind_exports(lifted_path, "lifted_", CMP_EXPORTS)
+    pairs = arith_pairs()
+    seen = {}
+    modes = tuple(ref.Mode(rc, daz, ftz) for rc in range(4) for daz in (False, True) for ftz in (False, True))
+    for mode in modes:
+        for name in CMP_EXPORTS:
+            for idx, (a, b) in enumerate(pairs):
+                got_n = base.invoke_under(driver, native[name], mode.mxcsr(), a, b)
+                got_l = base.invoke_under(driver, lifted[name], mode.mxcsr(), a, b)
+                want = cmp_reference(name, a, b, mode)
+                base.assert_equal_output("native", f"{name} [{mode.label()}]", idx, got_n, want)
+                base.assert_equal_output("lifted", f"{name} [{mode.label()}]", idx, got_l, want)
+                seen[(name, mode.rc, mode.daz, mode.ftz, idx)] = got_n
+    for (name, rc, daz, ftz, idx), got in seen.items():
+        if got != seen[(name, 0, daz, False, idx)]:
+            raise AssertionError(f"{name} case {idx}: rounding mode or FTZ changed a compare result")
+    for name in CMP_EXPORTS:
+        moved = sum(seen[(name, 0, True, False, i)] != seen[(name, 0, False, False, i)] for i in range(len(pairs)))
+        if bool(moved) == (name in DAZ_BLIND):
+            raise AssertionError(f"{name}: DAZ changed {moved} results, expected {'none' if name in DAZ_BLIND else 'some'}")
+    for quirk, name in CMP_QUIRKS:
+        mode = ref.Mode(ref.RN, True, False) if quirk == "ignore_daz" else ref.DEFAULT_MODE
+        caught = sum(
+            cmp_reference(name, a, b, mode, quirk=quirk) != seen[(name, mode.rc, mode.daz, mode.ftz, idx)]
+            for idx, (a, b) in enumerate(pairs))
+        if not caught:
+            raise AssertionError(f"reference quirk {quirk} on {name} [{mode.label()}] was never detected")
+    print(f"{len(seen)} packed double compare runs in {len(modes)} MXCSR states: native, lifted and reference agree; "
+          f"rounding mode and FTZ changed nothing, DAZ changed every export except {', '.join(DAZ_BLIND)}; "
+          f"{len(CMP_QUIRKS)} wrong predicate rules detected")
 
 
 def check_differential(native_path, lifted_path, altered_path):
@@ -228,6 +317,16 @@ def check_rejections(original_path):
         ("sqrtpd_mem_xmm4", (mem(Code.SQRTPD_XMM_XMMM128, R.XMM4, R.RCX, 0x20), st_xmm4, ret_ins),
          "xmm4 = op_sqrtpd(load128((rcx + 0x20ull)));"),
     ]
+    alt_accept += [
+        ("cmppd_xmm4_xmm5", (ld_xmm4, ld_xmm5, Instruction.create_reg_reg_u32(Code.CMPPD_XMM_XMMM128_IMM8, R.XMM4, R.XMM5, 6),
+                             st_xmm4, ret_ins), "xmm4 = op_cmppd(xmm4, xmm5, 0x6u);"),
+        ("cmppd_neg_disp", (ld_xmm0, Instruction.create_reg_mem_u32(
+            Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, MemoryOperand(R.RDX, displ=-32, displ_size=1), 3), st_xmm0, ret_ins),
+         "xmm0 = op_cmppd(xmm0, load128((rdx + 0xffffffffffffffe0ull)), 0x3u);"),
+        ("cmppd_rcx_source", (ld_xmm0, Instruction.create_reg_mem_u32(
+            Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, MemoryOperand(R.RCX, displ=16, displ_size=1), 7), st_xmm0, ret_ins),
+         "xmm0 = op_cmppd(xmm0, load128((rcx + 0x10ull)), 0x7u);"),
+    ]
     for label, seq, expected in alt_accept:
         raw = base.encode_seq(*seq)
         decoded = list(Decoder(64, raw, ip=0x1000))
@@ -264,11 +363,37 @@ def check_rejections(original_path):
             ("rcpps", Code.RCPPS_XMM_XMMM128), ("rsqrtps", Code.RSQRTPS_XMM_XMMM128),
         )
     ] + [
-        ("cmppd", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_u32(Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, R.XMM1, 0), ret_ins)),
+        ("cmpsd", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_u32(Code.CMPSD_XMM_XMMM64_IMM8, R.XMM0, R.XMM1, 0), ret_ins)),
         ("shufpd", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_u32(Code.SHUFPD_XMM_XMMM128_IMM8, R.XMM0, R.XMM1, 0), ret_ins)),
         ("cvtpi2pd", (Instruction.create_reg_mem(Code.CVTPI2PD_XMM_MMM64, R.XMM0, MemoryOperand(R.RDX)), ret_ins)),
     ]
-    other = [
+    def cmppd(dst, src, imm):
+        return Instruction.create_reg_reg_u32(Code.CMPPD_XMM_XMMM128_IMM8, dst, src, imm)
+
+    cmppd_rejects = [
+        ("cmppd_imm_8", (ld_xmm0, ld_xmm1, cmppd(R.XMM0, R.XMM1, 8), ret_ins), "unsupported cmppd predicate"),
+        ("cmppd_imm_1f", (ld_xmm0, ld_xmm1, cmppd(R.XMM0, R.XMM1, 0x1F), ret_ins), "unsupported cmppd predicate"),
+        ("cmppd_imm_ff", (ld_xmm0, ld_xmm1, cmppd(R.XMM0, R.XMM1, 0xFF), ret_ins), "unsupported cmppd predicate"),
+        ("vcmppd_vex", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_reg_u32(
+            Code.VEX_VCMPPD_XMM_XMM_XMMM128_IMM8, R.XMM2, R.XMM0, R.XMM1, 0), ret_ins), "non-legacy encoding"),
+        ("vcmppd_ymm_vex", (Instruction.create_reg_reg_reg_u32(
+            Code.VEX_VCMPPD_YMM_YMM_YMMM256_IMM8, R.YMM2, R.YMM0, R.YMM1, 0), ret_ins), "non-legacy encoding"),
+        ("vcmppd_evex", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_reg_u32(
+            Code.EVEX_VCMPPD_KR_K1_XMM_XMMM128B64_IMM8, R.K1, R.XMM0, R.XMM1, 0), ret_ins), "non-legacy encoding"),
+        ("nonvolatile_xmm7_cmppd_dst", (cmppd(R.XMM7, R.XMM1, 0), ret_ins), "nonvolatile vector register"),
+        ("nonvolatile_xmm9_cmppd_src", (ld_xmm0, cmppd(R.XMM0, R.XMM9, 0), ret_ins), "nonvolatile vector register"),
+        ("undefined_cmppd_dst", (ld_xmm1, cmppd(R.XMM0, R.XMM1, 0), ret_ins), "undefined vector register xmm0"),
+        ("undefined_cmppd_src", (ld_xmm0, cmppd(R.XMM0, R.XMM3, 0), ret_ins), "undefined vector register xmm3"),
+        ("unaligned_cmppd_m128", (ld_xmm0, Instruction.create_reg_mem_u32(
+            Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, MemoryOperand(R.RDX, displ=8, displ_size=1), 0), ret_ins),
+         "unaligned 16-byte memory operand"),
+        ("unaligned_cmppd_m128_plus1", (ld_xmm0, Instruction.create_reg_mem_u32(
+            Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, MemoryOperand(R.RCX, displ=1, displ_size=1), 4), ret_ins),
+         "unaligned 16-byte memory operand"),
+        ("non_arg_base_rax_cmppd", (ld_xmm0, Instruction.create_reg_mem_u32(
+            Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, MemoryOperand(R.RAX), 0), ret_ins), "unsupported memory base"),
+    ]
+    other = cmppd_rejects + [
         ("nonvolatile_xmm7_addpd_dst", (reg(Code.ADDPD_XMM_XMMM128, R.XMM7, R.XMM1), ret_ins), "nonvolatile vector register"),
         ("nonvolatile_xmm9_sqrtpd_dst", (ld_xmm1, reg(Code.SQRTPD_XMM_XMMM128, R.XMM9, R.XMM1), ret_ins),
          "nonvolatile vector register"),
@@ -330,7 +455,7 @@ def check_rejections(original_path):
         pdata_end_off = pe.get_offset_from_rva(pdata.VirtualAddress + rec_idx + 4)
         max_len = struct.unpack_from("<I", records, rec_idx + 4)[0] - entry
     by_label = {label: (seq, reason) for label, seq, reason in unit}
-    pe_patches = ("vaddpd_vex", "cmppd", "andpd", "addsd", "unaligned_divpd_m128", "nonvolatile_xmm7_addpd_dst",
+    pe_patches = ("vaddpd_vex", "cmpsd", "cmppd_imm_8", "unaligned_cmppd_m128", "andpd", "addsd", "unaligned_divpd_m128", "nonvolatile_xmm7_addpd_dst",
                   "undefined_sqrtpd_src", "nonvolatile_base_rbx_sqrtpd", "missing_ret")
     with TemporaryDirectory() as folder:
         patched_path = Path(folder) / "patched.dll"
@@ -359,4 +484,6 @@ if __name__ == "__main__":
     native_dll, lifted_dll, altered_dll, harness_dll = sys.argv[1:5]
     check_differential(native_dll, lifted_dll, altered_dll)
     check_modes(native_dll, lifted_dll, harness_dll)
+    check_cmp_differential(native_dll, lifted_dll, altered_dll)
+    check_cmp_modes(native_dll, lifted_dll, harness_dll)
     check_rejections(native_dll)

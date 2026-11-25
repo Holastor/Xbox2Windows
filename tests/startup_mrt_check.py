@@ -94,7 +94,12 @@ def check(work, consumer, backend, kind, dxc, fxc):
         if outputs.get('0') == 'sint':
             outputs['0'] = 'int'
         assert outputs == {'0': expected_type, '1': 'float'}, outputs
+        manifest = cache / f'{key}.txt'
+        manifest.rename(str(manifest) + '.pending')
+        env['X2W_TEST_PUBLISH_MANIFEST'] = str(manifest)
         pixels, log = draw(fmt)
+        del env['X2W_TEST_PUBLISH_MANIFEST']
+        assert Path(str(output) + '.first').read_bytes() == cleared
         assert f'2 targets (format {fmt}) -> 0x00000000' in log, log
         assert pixels == struct.pack('<I4B', INTEGER_WORD, 255, 0, 0, 255), pixels.hex()
         print(f'{kind} {backend} {expected_type} MRT0={INTEGER_WORD:08x}; UNORM MRT1=ff0000ff')

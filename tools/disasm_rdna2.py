@@ -110,6 +110,12 @@ def decode_v_reg64(reg_id: int) -> str:
     return decode_s_reg64(reg_id)
 
 
+def decode_v_reg128(reg_id: int) -> str:
+    """Decode a 128-bit VOP operand that only a VGPR quad can hold (a scalar source is refused by the caller)."""
+    vreg = reg_id - 256
+    return f"v[{vreg}:{vreg + 3}]" if vreg <= 252 else "<invalid VGPR quad>"
+
+
 def _format_operand_modifiers(val: str, is_abs: int, is_neg: int) -> str:
     """Wrap a disassembled operand with inline abs (`|...|`) and neg (`-`) modifiers."""
     if is_abs and is_neg:
@@ -587,6 +593,7 @@ VOP1_OPS = {
     0x0b: ("v_cvt_f32_f16_e32", "Convert float16 to float32"),
     0x0c: ("v_cvt_rpi_i32_f32_e32", "Convert float32 to int32 (round to +inf)"),
     0x0d: ("v_cvt_flr_i32_f32_e32", "Convert float32 to int32 (floor)"),
+    0x0e: ("v_cvt_off_f32_i4_e32", "Convert 4-bit signed offset to float32"),
     0x0f: ("v_cvt_f32_f64_e32", "Convert float64 to float32"),
     0x10: ("v_cvt_f64_f32_e32", "Convert float32 to float64"),
     0x11: ("v_cvt_f32_ubyte0_e32", "Convert unsigned byte 0 to float32"),
@@ -595,6 +602,11 @@ VOP1_OPS = {
     0x14: ("v_cvt_f32_ubyte3_e32", "Convert unsigned byte 3 to float32"),
     0x15: ("v_cvt_u32_f64_e32", "Convert float64 to uint32"),
     0x16: ("v_cvt_f64_u32_e32", "Convert uint32 to float64"),
+    0x17: ("v_trunc_f64_e32", "Truncate toward zero float64"),
+    0x18: ("v_ceil_f64_e32", "Ceiling float64"),
+    0x19: ("v_rndne_f64_e32", "Round to nearest even float64"),
+    0x1a: ("v_floor_f64_e32", "Floor float64"),
+    0x1b: ("v_pipeflush", "Flush the pipeline (no operands)"),
     0x20: ("v_fract_f32_e32", "Fractional part float32"),
     0x21: ("v_trunc_f32_e32", "Truncate toward zero float32"),
     0x22: ("v_ceil_f32_e32", "Ceiling float32"),
@@ -616,6 +628,12 @@ VOP1_OPS = {
     0x39: ("v_ffbh_u32_e32", "Find first bit high uint32"),
     0x3a: ("v_ffbl_b32_e32", "Find first bit low uint32"),
     0x3b: ("v_ffbh_i32_e32", "Find first bit high int32"),
+    0x3c: ("v_frexp_exp_i32_f64_e32", "Exponent of float64 as int32"),
+    0x3d: ("v_frexp_mant_f64_e32", "Mantissa of float64"),
+    0x3e: ("v_fract_f64_e32", "Fractional part float64"),
+    0x3f: ("v_frexp_exp_i32_f32_e32", "Exponent of float32 as int32"),
+    0x40: ("v_frexp_mant_f32_e32", "Mantissa of float32"),
+    0x41: ("v_clrexcp", "Clear the floating-point exception flags (no operands)"),
     0x42: ("v_movreld_b32_e32", "Vector copy with relative destination"),
     0x43: ("v_movrels_b32_e32", "Vector copy with relative source"),
     0x44: ("v_movrelsd_b32_e32", "Vector copy with relative source and destination"),
@@ -624,13 +642,25 @@ VOP1_OPS = {
     0x51: ("v_cvt_f16_i16_e32", "Convert int16 to float16"),
     0x52: ("v_cvt_u16_f16_e32", "Convert float16 to uint16"),
     0x53: ("v_cvt_i16_f16_e32", "Convert float16 to int16"),
+    0x54: ("v_rcp_f16_e32", "Reciprocal 1/x float16"),
+    0x55: ("v_sqrt_f16_e32", "Square root sqrt(x) float16"),
+    0x56: ("v_rsq_f16_e32", "Reciprocal square root 1/sqrt(x) float16"),
+    0x57: ("v_log_f16_e32", "Logarithm log2(x) float16"),
+    0x58: ("v_exp_f16_e32", "Exponent 2^x float16"),
+    0x59: ("v_frexp_mant_f16_e32", "Mantissa of float16"),
+    0x5a: ("v_frexp_exp_i16_f16_e32", "Exponent of float16 as int16"),
     0x5b: ("v_floor_f16_e32", "Floor float16"),
     0x5c: ("v_ceil_f16_e32", "Ceiling float16"),
     0x5d: ("v_trunc_f16_e32", "Truncate toward zero float16"),
     0x5e: ("v_rndne_f16_e32", "Round to nearest even float16"),
     0x5f: ("v_fract_f16_e32", "Fractional part float16"),
+    0x60: ("v_sin_f16_e32", "Sine float16"),
+    0x61: ("v_cos_f16_e32", "Cosine float16"),
+    0x62: ("v_sat_pk_u8_i16_e32", "Saturate int16 pair to packed uint8"),
     0x63: ("v_cvt_norm_i16_f16_e32", "Convert float16 to normalized int16"),
     0x64: ("v_cvt_norm_u16_f16_e32", "Convert float16 to normalized uint16"),
+    0x65: ("v_swap_b32", "Swap the 32-bit values of two VGPRs"),
+    0x68: ("v_swaprel_b32", "Swap two VGPRs, relative to M0"),
 }
 
 VOPC_OPS = {
@@ -932,6 +962,7 @@ VOP3_NATIVE_OPS = {
     0x172: ("v_qsad_pk_u16_u8", "V_QSAD_PK_U16_U8 (VOP3A)", 3, False, 2, (2, 1, 2)),
     0x173: ("v_mqsad_pk_u16_u8", "V_MQSAD_PK_U16_U8 (VOP3A)", 3, False, 2, (2, 1, 2)),
     0x174: ("v_trig_preop_f64", "V_TRIG_PREOP_F64 (VOP3A)", 2, False, 2, (2, 1)),
+    0x175: ("v_mqsad_u32_u8", "V_MQSAD_U32_U8 (VOP3A)", 3, False, 4, (2, 1, 4)),
     0x176: ("v_mad_u64_u32", "V_MAD_U64_U32 (VOP3B)", 3, True, 2, (1, 1, 2)),
     0x177: ("v_mad_i64_i32", "V_MAD_I64_I32 (VOP3B)", 3, True, 2, (1, 1, 2)),
     0x178: ("v_xor3_b32", "V_XOR3_B32 (VOP3A)", 3, False, 1, (1, 1, 1)),
@@ -1003,11 +1034,20 @@ VOP3_RESTRICTED_MODIFIERS = {
     "v_mul_lo_i32": (False, False),
     "v_qsad_pk_u16_u8": (True, False),
     "v_mqsad_pk_u16_u8": (True, False),
+    "v_mqsad_u32_u8": (True, False),
     "v_interp_mov_f32_e64": (True, True),
 }
 
-# The v_interp_mov_f32_e64 parameter selector (src1 field): p10, p20 and p0.
+# The v_interp_mov_f32 parameter selector (VINTRP vsrc field, VOP3A src1 field): p10, p20 and p0.
+# LLVM prints any other value as invalid_param_<n> and its assembler accepts none of them.
 VINTRP_MOV_PARAMS = ("p10", "p20", "p0")
+
+
+def _format_vop3_vgpr_dst(vdst: int, width: int) -> str:
+    """Format a VOP3 VGPR destination of 1, 2 or 4 registers; a group running past v255 is flagged, not printed."""
+    if vdst + width > 256:
+        return {2: "<invalid VGPR pair>", 4: "<invalid VGPR quad>"}[width]
+    return _format_vgpr_range(vdst, width)
 
 
 def _vop3_output_modifiers(clamp: int, omod: int) -> str:
@@ -1024,6 +1064,9 @@ def _vop3_restricted_encoding_is_valid(op_name: str, arity: int, w0: int, w1: in
     if ((w0 >> 15) & 1 and not allow_clamp) or ((w1 >> 27) & 0x3 and not allow_omod):
         return False
     if arity < 3 and (w1 >> 18) & 0x1ff:
+        return False
+    if op_name == "v_mqsad_u32_u8" and not 256 <= (w1 >> 18) & 0x1ff <= 511:
+        # The accumulator is a VGPR quad: llvm-mc rejects an SGPR, constant or special-register src2.
         return False
     if op_name == "v_interp_mov_f32_e64":
         # src0 holds attr[5:0] and channel[7:6] only; src1 selects p10, p20 or p0.
@@ -1278,6 +1321,7 @@ SDWA_SEL_NAMES = ("BYTE_0", "BYTE_1", "BYTE_2", "BYTE_3", "WORD_0", "WORD_1", "D
 SDWA_DST_UNUSED_NAMES = ("UNUSED_PAD", "UNUSED_SEXT", "UNUSED_PRESERVE")
 SDWA_OMOD_NAMES = ("", " mul:2", " mul:4", " div:2")
 VOP1_SDWA_UNSUPPORTED = frozenset(("v_readfirstlane_b32", "v_pipeflush", "v_clrexcp", "v_swap_b32", "v_swaprel_b32"))
+VOP1_NO_OPERAND_OPS = frozenset(("v_pipeflush", "v_clrexcp"))
 VOP1_SDWA_VGPR_ONLY_SRC0 = frozenset(("v_movrels_b32", "v_movrelsd_b32", "v_movrelsd_2_b32"))
 VOP2_SDWA_UNSUPPORTED_OPS = frozenset((0x02, 0x06, 0x0d, 0x1f, 0x20, 0x21, 0x2b, 0x2c, 0x2d, 0x36, 0x37, 0x38, 0x3c))
 # Scalar source codes 209-234 are outside the supported LLVM 15 decoder subset for GFX10 SDWA: LLVM 15
@@ -2354,7 +2398,7 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         length = 4
         is_64 = op_name.endswith(("_b64", "_u64", "_i64"))
         dst_64 = (is_64 and not op_name.startswith(("s_bcnt0_i32_", "s_bcnt1_i32_", "s_ff0_i32_", "s_ff1_i32_", "s_flbit_i32_"))) or op_name == "s_bitreplicate_b64_b32"
-        src0_64 = is_64 and op_name != "s_bitreplicate_b64_b32"
+        src0_64 = is_64 and op_name not in ("s_bitreplicate_b64_b32", "s_bitset0_b64", "s_bitset1_b64")
         if ssrc0 == 255:
             if offset + 8 > len(data):
                 return (4, "sop1_truncated", f"{op_name} <truncated>", "Incomplete SOP1 literal")
@@ -2471,9 +2515,15 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
             return _decode_vop1_dpp(w1, vdst, src0, op_name, comment)
         if src0 in VOP_EXTENSION_FORMS:
             return _vop_extension(data, offset, "vop1", op_name, src0)
+        if op_name in VOP1_NO_OPERAND_OPS:
+            # LLVM prints the bare mnemonic and takes no literal dword even when SRC0 is 255.
+            return (4, op_name, op_name, comment)
         length = 4
-        wide_dst = op_name.startswith(("v_cvt_f64_i32", "v_cvt_f64_u32", "v_cvt_f64_f32")) or op_name.endswith(("_f64_e32", "_f64"))
-        wide_src0 = op_name.startswith(("v_cvt_i32_f64", "v_cvt_u32_f64", "v_cvt_f32_f64", "v_frexp_exp_i32_f64")) or op_name.endswith(("_f64_e32", "_f64"))
+        # A 32-bit result from a binary64 source: the name ends in _f64 but the destination is one VGPR.
+        narrow_dst = op_name.startswith(("v_cvt_i32_f64", "v_cvt_u32_f64", "v_cvt_f32_f64", "v_frexp_exp_i32_f64"))
+        wide_dst = op_name.startswith(("v_cvt_f64_i32", "v_cvt_f64_u32", "v_cvt_f64_f32")) or (
+            op_name.endswith(("_f64_e32", "_f64")) and not narrow_dst)
+        wide_src0 = narrow_dst or op_name.endswith(("_f64_e32", "_f64"))
         if src0 == 255:
             if offset + 8 > len(data):
                 return (4, "vop1_truncated", f"{op_name} <truncated>", "Incomplete VOP1 literal")
@@ -2505,6 +2555,8 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         op_name, comment = op_info
         length = 4
         literal = None
+        if src0 in (233, 234, 250):
+            return _vop_extension(data, offset, "vopc", op_name, src0)
         if src0 in (249, 255):
             extension = "SDWA" if src0 == 249 else "literal"
             if offset + 8 > len(data):
@@ -2583,8 +2635,14 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         vsrc = w0 & 0xff
         op_names = {0: "v_interp_p1_f32_e32", 1: "v_interp_p2_f32_e32", 2: "v_interp_mov_f32_e32"}
         op_name = op_names.get(op, f"v_interp_{op}")
-        asm = f"{op_name} v{vdst}, v{vsrc}, attr{attr}.{chan}"
         comment = f"Parameter interpolation stage {op+1} for attribute {attr}.{chan}"
+        if op == 2:
+            # The mov form's vsrc field is the parameter selector, not a VGPR.
+            if vsrc >= len(VINTRP_MOV_PARAMS):
+                return (4, f"{op_name}_unsupported", f"{op_name} <unsupported VINTRP encoding>",
+                        f"v_interp_mov_f32 parameter selector {vsrc} is not p10, p20 or p0")
+            return (4, op_name, f"{op_name} v{vdst}, {VINTRP_MOV_PARAMS[vsrc]}, attr{attr}.{chan}", comment)
+        asm = f"{op_name} v{vdst}, v{vsrc}, attr{attr}.{chan}"
         return (4, op_name, asm, comment)
 
     # 9. EXP: 64-bit [31:26] == 0b111110 (0xf8000000)
@@ -2648,12 +2706,16 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
             sbase_str = f"s[{sbase}:{sbase + base_width - 1}]"
         soffset = (w1 >> 25) & 0x7f
         imm_offset = w1 & 0x1fffff
+        if imm_offset & 0x100000:
+            # GFX9+ SMEM OFFSET[20:0] is a signed 21-bit byte offset (LLVM sign-extends it)
+            imm_offset -= 0x200000
+        imm_str = f"-0x{-imm_offset:x}" if imm_offset < 0 else f"0x{imm_offset:x}"
         if soffset == 125:
-            off_str = f"0x{imm_offset:x}"
+            off_str = imm_str
         else:
             off_str = decode_s_reg(soffset)
             if imm_offset:
-                off_str += f" offset:0x{imm_offset:x}"
+                off_str += f" offset:{imm_str}"
         mods = []
         if (w0 >> 16) & 1:
             mods.append("glc")
@@ -2687,6 +2749,14 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
         elif op not in MIMG_DERIV_OPS:
             deriv_addrs = 0
         addr_count = base_addrs + extra_addrs + deriv_addrs
+        a16 = (w1 >> 30) & 1
+        packed_2d = (
+            a16
+            and op_name in ("image_load", "image_sample", "image_sample_lz")
+            and dim_name == "SQ_RSRC_IMG_2D"
+        )
+        if packed_2d:
+            addr_count = 1  # Two 16-bit 2D coordinates share one VGPR.
         d16 = (w1 >> 31) & 1
         # A gather returns the four texels of the selected component whatever the one-hot mask is.
         n_data = 4 if op_name.startswith("image_gather4") else max(1, bin(dmask).count("1"))
@@ -2725,10 +2795,12 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
             mods.append("tfe")
         if (w0 >> 17) & 1:
             mods.append("lwe")
-        if (w1 >> 30) & 1:
+        if a16:
             mods.append("a16")
         if d16:
             mods.append("d16")
+        if packed_2d and nsize:
+            mods.append("invalid_nsa")  # A single address VGPR requires no NSA extension.
         # Word 0 bits 6 and 14 and word 1 bits 29:26 are reserved on gfx10: LLVM assembles none of them and
         # ignores them when disassembling, so a set bit is surfaced instead of vanishing from the listing.
         if (w0 & 0x4040) or (w1 >> 26) & 0xf:
@@ -2950,7 +3022,7 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
             base_info = VOP1_OPS.get(vop1_op, (f"v_vop1_{vop1_op:02x}", "Unknown VOP1"))
             op_name = base_info[0].replace("_e32", "_e64")
             comment = f"{base_info[1]} (VOP3A)"
-            if op_name == "v_nop":
+            if op_name == "v_nop" or op_name in VOP1_NO_OPERAND_OPS:
                 arity = 0
                 dst_width = 0
                 src_widths = ()
@@ -3008,8 +3080,15 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
                     "v_readfirstlane_b32 <unsupported VOP3A encoding>",
                     "VOP3A encoding of v_readfirstlane_b32 is not available on gfx1013")
 
+        if op_name in ("v_swap_b32", "v_swaprel_b32"):
+            # These two exist only as 32-bit VOP1: llvm-mc rejects the e64 spelling. Keep the eight-byte boundary.
+            return (8, f"{op_name}_unsupported", f"{op_name} <unsupported VOP3A encoding>",
+                    f"{op_name} has no VOP3A encoding on gfx1013")
+
         if op_name == "v_nop":
             return (8, "v_nop", "v_nop", "Vector no-op (VOP3A)")
+        if op_name in VOP1_NO_OPERAND_OPS:
+            return (8, op_name, op_name, comment)
 
         restricted = op_name in VOP3_RESTRICTED_MODIFIERS
         if restricted:
@@ -3051,6 +3130,8 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
                 val = f"0x{literal:x}"
             elif width == 2:
                 val = decode_v_reg64(reg_id)
+            elif width == 4:
+                val = decode_v_reg128(reg_id)
             else:
                 val = decode_v_reg(reg_id)
             return _format_operand_modifiers(val, is_abs, is_neg)
@@ -3063,10 +3144,10 @@ def decode_instruction(data: bytes, offset: int) -> tuple[int, str, str, str]:
             asm = f"{op_name} {dst_str}, {', '.join(src_strs)}"
         elif is_vop3b:
             sdst_str = decode_s_reg(sdst)
-            dst_str = f"v[{vdst}:{vdst + 1}]" if dst_width == 2 and vdst < 255 else (f"<invalid VGPR pair>" if dst_width == 2 else f"v{vdst}")
+            dst_str = _format_vop3_vgpr_dst(vdst, dst_width)
             asm = f"{op_name} {dst_str}, {sdst_str}, {', '.join(src_strs)}"
         else:
-            dst_str = f"v[{vdst}:{vdst + 1}]" if dst_width == 2 and vdst < 255 else (f"<invalid VGPR pair>" if dst_width == 2 else f"v{vdst}")
+            dst_str = _format_vop3_vgpr_dst(vdst, dst_width)
             asm = f"{op_name} {dst_str}, {', '.join(src_strs)}"
 
         if any(op_sel):
@@ -3143,17 +3224,22 @@ def main():
 
     args = parser.parse_args()
 
+    all_listings = []
+    missing = False
+
     # Hex decode mode
     if args.hex:
-        raw_bytes = bytes.fromhex(args.hex.replace(" ", ""))
+        try:
+            raw_bytes = bytes.fromhex(args.hex.replace(" ", ""))
+        except ValueError as exc:
+            parser.error(f"--hex: {exc}")
         insns = disassemble_binary(raw_bytes, "hex_input")
         print_disassembly("hex_input", insns)
-        return 0
-
-    if not args.targets:
+        all_listings.append(("hex_input", insns))
+        args.targets = []
+    elif not args.targets:
         parser.error("Specify targets or provide hex via --hex")
 
-    all_listings = []
     for target in args.targets:
         if target.is_file():
             data = target.read_bytes()
@@ -3168,6 +3254,9 @@ def main():
                 insns = disassemble_binary(data, f.name)
                 print_disassembly(f.name, insns)
                 all_listings.append((f.name, insns))
+        else:
+            print(f"error: {target}: not found", file=sys.stderr)
+            missing = True
 
     if args.output and all_listings:
         with args.output.open("w", encoding="utf-8") as out_f:
@@ -3178,7 +3267,7 @@ def main():
                 out_f.write("\n")
         print(f"[+] Disassembly saved to: {args.output}")
 
-    return 0
+    return 1 if missing else 0
 
 
 if __name__ == "__main__":

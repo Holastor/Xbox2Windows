@@ -63,6 +63,15 @@ def check(directory, consumer, backend):
         if pixels != expected:
             raise AssertionError(f"actual {pixels.hex()} expected {expected.hex()}")
         observations.append(pixels)
+    # Hold back the last-published marker while keeping the generated shader bytecode in place.
+    key = gfx2hlsl.pipeline_key(vs.read_bytes(), ps.read_bytes(), root.read_bytes())
+    manifest = cache / f"{key:016x}.txt"
+    manifest.rename(str(manifest) + ".pending")
+    run = subprocess.run(args + [backend, output], env=dict(env, X2W_TEST_PUBLISH_MANIFEST=str(manifest)),
+                         capture_output=True, text=True, timeout=30)
+    assert run.returncode == 0, run.stderr
+    assert Path(str(output) + ".first").read_bytes() == clear * 32
+    assert output.read_bytes() == observations[1], "same guest PSO remained clear after manifest publication"
     wrong = sum(observations[0][i:i+4] != observations[1][i:i+4] for i in range(0, 8 * 4 * 4, 4))
     assert wrong == 16, f"swapping the pixel shader produced {wrong} changed pixels"
     print(f"{backend}: red/green draws exact, 32 RGBA pixels each; swapped shader differs at {wrong} of 32")

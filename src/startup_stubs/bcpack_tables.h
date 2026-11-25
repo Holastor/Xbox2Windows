@@ -1,5 +1,7 @@
 // Generated BCPack model and codebook tables.
-// Codebook tables (BC7_CONTROL_TABLE, BC7_DICTIONARY, BC1_WINDOW, BC1_QUAD_MASKS) adapted
+// Codebook, rank, and dictionary tables (BC7_CONTROL_TABLE, BC7_DICTIONARY, BC1_WINDOW,
+// BC1_QUAD_MASKS, plus bcpack_tables_bcn.inl: RANK_PAIR_BC4, BC4_DICTIONARY, RANK_PAIR_BC5,
+// BC5_DICTIONARY, RANK_PAIR_BC3_ALPHA, RANK_QUAD_BC3_COLOUR, BC3_DICTIONARY) adapted
 // from bcpack-rs (pinned revision c55c5fad539644b8cf5a705051df214291763fc0)
 // by Ahmet Dedeler (https://github.com/Ahmet-Dedeler, https://ahmetdedeler.com).
 // Source: https://github.com/Ahmet-Dedeler/bcpack-rs

@@ -664,7 +664,7 @@ def check_alt_encodings_and_rejections(original_path):
         ("sqrtss", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg(Code.SQRTSS_XMM_XMMM32, R.XMM0, R.XMM1), ret_ins)),
         ("maxss", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg(Code.MAXSS_XMM_XMMM32, R.XMM0, R.XMM1), ret_ins)),
         ("addss", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg(Code.ADDSS_XMM_XMMM32, R.XMM0, R.XMM1), ret_ins)),
-        ("cmppd", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_u32(Code.CMPPD_XMM_XMMM128_IMM8, R.XMM0, R.XMM1, 0), ret_ins)),
+        ("cvtpd2ps", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg(Code.CVTPD2PS_XMM_XMMM128, R.XMM0, R.XMM1), ret_ins)),
         ("cmpsd", (ld_xmm0, ld_xmm1, Instruction.create_reg_reg_u32(Code.CMPSD_XMM_XMMM64_IMM8, R.XMM0, R.XMM1, 0), ret_ins)),
         ("movlpd", (ld_xmm0, Instruction.create_reg_mem(Code.MOVLPD_XMM_M64, R.XMM0, MemoryOperand(R.RDX)), ret_ins)),
         ("movhpd", (ld_xmm0, Instruction.create_reg_mem(Code.MOVHPD_XMM_M64, R.XMM0, MemoryOperand(R.RDX)), ret_ins)),

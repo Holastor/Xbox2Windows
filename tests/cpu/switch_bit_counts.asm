@@ -470,18 +470,11 @@ neg_lzcnt_cmovns PROC FRAME
     ret
 neg_lzcnt_cmovns ENDP
 
-neg_bswap64 PROC FRAME
+neg_xlatb PROC FRAME
     .endprolog
-    mov rax, rcx
-    bswap rax
+    mov rbx, rcx
+    xlatb
     ret
-neg_bswap64 ENDP
-
-neg_bswap32 PROC FRAME
-    .endprolog
-    mov eax, ecx
-    bswap eax
-    ret
-neg_bswap32 ENDP
+neg_xlatb ENDP
 
 END

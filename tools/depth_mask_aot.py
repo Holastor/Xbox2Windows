@@ -2,6 +2,9 @@
 
 import argparse
 import re
+import struct
+import tempfile
+import zlib
 from pathlib import Path
 
 from pixel_aot import container_code, disassemble
@@ -22,8 +25,8 @@ BINARY_F32 = {
 
 
 # One-source binary32 e32 forms with a VGPR, constant or scalar word source. round is round-half-even, like
-# v_rndne_f32. The result of rcp, rsq and sqrt is whatever the host computes: a caller may only rely on inputs
-# whose exact result is an integer, and a zero or negative operand is not claimed. Source modifiers, clamp,
+# v_rndne_f32. The result of rcp, rsq, sqrt, exp and log is whatever the host computes: a caller may only rely on inputs
+# whose exact result is an integer, and a zero or negative operand (or an overflow) is not claimed. Source modifiers, clamp,
 # output modifiers and a second source stay rejected; the e64 spelling is accepted only without modifiers (see plain).
 UNARY_F32 = {
     "v_rcp_f32_e32": "(1.0f / {x})",
@@ -32,6 +35,9 @@ UNARY_F32 = {
     "v_floor_f32_e32": "floor({x})",
     "v_trunc_f32_e32": "trunc({x})",
     "v_rndne_f32_e32": "round({x})",
+    "v_ceil_f32_e32": "ceil({x})",
+    "v_exp_f32_e32": "exp2({x})",
+    "v_log_f32_e32": "log2({x})",
 }
 
 
@@ -214,6 +220,8 @@ def lower(decoded, tables):
                 x, y = map(fp, args[1:])
                 expr = BINARY_F32[op](x, y)
             elif op == "v_fmac_f32_e32" and len(args) == 3:
+                if dest not in vector:
+                    raise ValueError("Unwritten vector register")
                 expr = f"mad({fp(args[1])}, {fp(args[2])}, {vector[dest]})"
             elif op in UNARY_F32 and len(args) == 2:
                 expr = UNARY_F32[op].format(x=fp(args[1]))
@@ -266,33 +274,65 @@ def lower(decoded, tables):
     return "\n".join(lines) + "\n"
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("container", type=Path)
-    p.add_argument("--llvm", required=True)
-    p.add_argument(
+def _parse_int(token: str) -> int:
+    return int(token, 0)
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("container", type=Path)
+    parser.add_argument("--llvm", required=True)
+    parser.add_argument(
         "--table",
         action="append",
         nargs=2,
-        type=lambda t: int(t, 0),
+        type=_parse_int,
         required=True,
         metavar=("ENTRY_SGPR", "BYTE_OFFSET"),
         help="b0 then b1",
     )
-    p.add_argument("--output", type=Path, required=True)
-    a = p.parse_args()
-    if (
-        a.output.suffix.lower() != ".hlsl"
-        or a.output.resolve() == a.container.resolve()
-    ):
-        p.error("Choose an HLSL destination distinct from the input")
-    code = container_code(
-        parts(a.container.read_bytes())[b"DXIL"], stage=0, llvm=a.llvm
-    )
-    source = lower(disassemble(code, a.llvm, offsets=True), a.table)
-    a.output.parent.mkdir(parents=True, exist_ok=True)
-    a.output.write_text(source, encoding="ascii")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if not args.table or any(sgpr < 0 or offset < 0 for sgpr, offset in args.table):
+        parser.error(
+            "Expected non-empty --table pairs with non-negative SGPR and byte offset"
+        )
+    try:
+        dest = args.output.resolve()
+        src = args.container.resolve()
+    except OSError as exc:
+        parser.exit(1, f"{exc}\n")
+    if dest.suffix.lower() != ".hlsl" or dest == src:
+        parser.error("Choose an HLSL destination distinct from the input")
+    tmp_path = None
+    try:
+        sections = parts(args.container.read_bytes())
+        if b"DXIL" not in sections:
+            raise ValueError("DXBC container has no DXIL part")
+        code = container_code(sections[b"DXIL"], stage=0, llvm=args.llvm)
+        source = lower(disassemble(code, args.llvm, offsets=True), args.table)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="ascii",
+            dir=dest.parent,
+            prefix=f".{dest.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            tmp_path = Path(handle.name)
+            handle.write(source)
+        tmp_path.replace(dest)
+    except (OSError, ValueError, struct.error, zlib.error) as exc:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        parser.exit(1, f"{exc}\n")
+    except BaseException:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
