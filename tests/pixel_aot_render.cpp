@@ -671,6 +671,31 @@ void check_compute_to_pixel(ID3D12Device* device, const char* compute, const cha
                 stale ? stale.Get() : current.Get());
 }
 
+void check_pixel_gather(ID3D12Device* device, const char* shader, const char* reference)
+{
+    constexpr UINT side = 8;
+    std::ifstream file(reference, std::ios::binary);
+    std::array<UINT, 2> view{};
+    file.read(reinterpret_cast<char*>(view.data()), sizeof(view));
+    const auto [first, count] = view;
+    if (!file || first > 1 || !count || count > 3)
+        throw std::runtime_error("Invalid pixel gather view");
+    std::vector<PixelInput> levels;
+    for (UINT mip = 0; mip < count; ++mip) {
+        const UINT extent = side >> mip;
+        PixelInput input{extent, extent, 1, DXGI_FORMAT_R32G32B32A32_FLOAT};
+        input.rows.resize(size_t(extent) * extent * sizeof(Color));
+        file.read(reinterpret_cast<char*>(input.rows.data()), static_cast<std::streamsize>(input.rows.size()));
+        levels.push_back(std::move(input));
+    }
+    auto& expected = levels.front().expected;
+    expected.resize(side * side);
+    file.read(reinterpret_cast<char*>(expected.data()), side * side * sizeof(Color));
+    if (!file || file.peek() != std::char_traits<char>::eof())
+        throw std::runtime_error("Invalid pixel gather case data");
+    draw_verified(device, shader, levels, first, 0, nullptr);
+}
+
 void check_pixel_quad_lod(ID3D12Device* device, const char* shader, const char* rawReadback,
                           bool allowUpperRawLodStep)
 {

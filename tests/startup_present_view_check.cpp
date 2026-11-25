@@ -52,6 +52,72 @@ void table()
     expect("unknown refused", DXGI_FORMAT_UNKNOWN, none);
 }
 
+void expect_supported(const char* name, const D3D12_RESOURCE_DESC& desc, bool wanted)
+{
+    const bool got = x2w_startup::present_surface_supported(desc);
+    if (got != wanted) {
+        std::printf("FAIL %s: supported=%d, expected %d (dim=%d samples=%u flags=0x%x fmt=%d)\n",
+                    name, got ? 1 : 0, wanted ? 1 : 0, desc.Dimension, desc.SampleDesc.Count, desc.Flags, desc.Format);
+        ++failures;
+    }
+}
+
+void surface_support()
+{
+    D3D12_RESOURCE_DESC tex2d{D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_NONE};
+    expect_supported("2d rgba8 unorm", tex2d, true);
+
+    D3D12_RESOURCE_DESC rt = tex2d;
+    rt.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    rt.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    expect_supported("2d typeless rt", rt, true);
+
+    D3D12_RESOURCE_DESC deny = tex2d;
+    deny.Flags = D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    expect_supported("2d deny_srv", deny, false);
+
+    D3D12_RESOURCE_DESC dsv = tex2d;
+    dsv.Format = DXGI_FORMAT_D32_FLOAT;
+    dsv.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    expect_supported("2d dsv deny_srv", dsv, false);
+
+    D3D12_RESOURCE_DESC buf{D3D12_RESOURCE_DIMENSION_BUFFER, 0, 64, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+    expect_supported("buffer refused", buf, false);
+
+    D3D12_RESOURCE_DESC tex1d = tex2d;
+    tex1d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    tex1d.Height = 1;
+    expect_supported("1d refused", tex1d, false);
+
+    D3D12_RESOURCE_DESC tex3d = tex2d;
+    tex3d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    expect_supported("3d refused", tex3d, false);
+
+    D3D12_RESOURCE_DESC msaa = tex2d;
+    msaa.SampleDesc.Count = 4;
+    expect_supported("msaa4 refused", msaa, false);
+
+    D3D12_RESOURCE_DESC zero_samples = tex2d;
+    zero_samples.SampleDesc.Count = 0;
+    expect_supported("samples0 refused", zero_samples, false);
+
+    D3D12_RESOURCE_DESC zero_width = tex2d;
+    zero_width.Width = 0;
+    expect_supported("width0 refused", zero_width, false);
+
+    D3D12_RESOURCE_DESC zero_height = tex2d;
+    zero_height.Height = 0;
+    expect_supported("height0 refused", zero_height, false);
+
+    D3D12_RESOURCE_DESC unknown_fmt = tex2d;
+    unknown_fmt.Format = DXGI_FORMAT_UNKNOWN;
+    expect_supported("unknown fmt refused", unknown_fmt, false);
+
+    D3D12_RESOURCE_DESC ambig_fmt = tex2d;
+    ambig_fmt.Format = DXGI_FORMAT_R32_TYPELESS;
+    expect_supported("ambiguous fmt refused", ambig_fmt, false);
+}
+
 void check(HRESULT hr, const char* what)
 {
     if (FAILED(hr)) throw std::runtime_error(std::string(what) + " failed");
@@ -185,6 +251,50 @@ bool readback(ID3D12Device* device, const Case& item)
     return bad == 0;
 }
 
+void verify_surface_guards(ID3D12Device* device)
+{
+    D3D12_HEAP_PROPERTIES defaults{};
+    defaults.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    const auto create = [&](const D3D12_RESOURCE_DESC& desc, D3D12_RESOURCE_STATES state, const char* label) {
+        ComPtr<ID3D12Resource> resource;
+        check(device->CreateCommittedResource(&defaults, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource)), label);
+        return resource;
+    };
+
+    const D3D12_RESOURCE_DESC dsv_desc{D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 16, 16, 1, 1, DXGI_FORMAT_D32_FLOAT, {1, 0},
+                                       D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE};
+    auto dsv = create(dsv_desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, "dsv deny_srv");
+    expect_supported("warp dsv deny_srv", dsv->GetDesc(), false);
+
+    const D3D12_RESOURCE_DESC buf_desc{D3D12_RESOURCE_DIMENSION_BUFFER, 0, 64, 1, 1, 1, DXGI_FORMAT_UNKNOWN, {1, 0},
+                                       D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE};
+    auto buf = create(buf_desc, D3D12_RESOURCE_STATE_COMMON, "buffer");
+    expect_supported("warp buffer", buf->GetDesc(), false);
+
+    const D3D12_RESOURCE_DESC msaa_desc{D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {4, 0},
+                                        D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET};
+    auto msaa = create(msaa_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, "msaa4");
+    expect_supported("warp msaa4", msaa->GetDesc(), false);
+
+    const D3D12_RESOURCE_DESC rt_desc{D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 16, 16, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0},
+                                      D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET};
+    auto rt = create(rt_desc, D3D12_RESOURCE_STATE_COMMON, "valid rt");
+    const D3D12_RESOURCE_DESC actual_rt = rt->GetDesc();
+    expect_supported("warp valid rt", actual_rt, true);
+
+    const D3D12_DESCRIPTOR_HEAP_DESC heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+    ComPtr<ID3D12DescriptorHeap> heap;
+    check(device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&heap)), "guard srv heap");
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format = x2w_startup::present_view_format(actual_rt.Format);
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    device->CreateShaderResourceView(rt.Get(), &srv, heap->GetCPUDescriptorHandleForHeapStart());
+    check(device->GetDeviceRemovedReason(), "device removed reason");
+}
+
 ComPtr<ID3D12Device> create_device(bool warp)
 {
     ComPtr<IDXGIFactory4> factory;
@@ -220,11 +330,12 @@ int main(int argc, char** argv)
     }
     if (!adapter) {
         table();
+        surface_support();
         if (failures) {
             std::printf("startup_present_view: %d FAILED\n", failures);
             return 1;
         }
-        std::printf("startup_present_view: PASS (4 mapped, 6 typed, 18 refused, 2 invalid)\n");
+        std::printf("startup_present_view: PASS (4 mapped, 6 typed, 18 refused, 2 invalid, 13 surface checks)\n");
         return 0;
     }
     try {
@@ -247,6 +358,7 @@ int main(int argc, char** argv)
             run.view = map_format(item.typeless);
             if (!readback(device.Get(), run)) ++failures;
         }
+        verify_surface_guards(device.Get());
     } catch (const std::exception& error) {
         std::printf("startup_present_view: %s\n", error.what());
         return 1;

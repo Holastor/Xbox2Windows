@@ -94,14 +94,9 @@ inline Gfx10FormatInfo gfx10_format_info(DXGI_FORMAT fmt)
     case DXGI_FORMAT_R16G16_SNORM:
     case DXGI_FORMAT_R16G16_SINT:
     case DXGI_FORMAT_R32_TYPELESS:
-    case DXGI_FORMAT_D32_FLOAT:
     case DXGI_FORMAT_R32_FLOAT:
     case DXGI_FORMAT_R32_UINT:
     case DXGI_FORMAT_R32_SINT:
-    case DXGI_FORMAT_R24G8_TYPELESS:
-    case DXGI_FORMAT_D24_UNORM_S8_UINT:
-    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
-    case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
     case DXGI_FORMAT_B8G8R8A8_UNORM:
     case DXGI_FORMAT_B8G8R8X8_UNORM:
     case DXGI_FORMAT_B8G8R8A8_TYPELESS:
@@ -117,7 +112,6 @@ inline Gfx10FormatInfo gfx10_format_info(DXGI_FORMAT fmt)
     case DXGI_FORMAT_R8G8_SINT:
     case DXGI_FORMAT_R16_TYPELESS:
     case DXGI_FORMAT_R16_FLOAT:
-    case DXGI_FORMAT_D16_UNORM:
     case DXGI_FORMAT_R16_UNORM:
     case DXGI_FORMAT_R16_UINT:
     case DXGI_FORMAT_R16_SNORM:
@@ -142,15 +136,7 @@ inline Gfx10FormatInfo gfx10_format_info(DXGI_FORMAT fmt)
 inline UINT gfx10_swizzle_from_desc(const D3D12_RESOURCE_DESC& d)
 {
     const UINT layout = static_cast<UINT>(d.Layout);
-    if ((layout & 0xFF00) == 0x100) return layout & 0xFF;
-    if (layout == D3D12_TEXTURE_LAYOUT_ROW_MAJOR) return SW_LINEAR;
-    if (d.Format == DXGI_FORMAT_BC7_UNORM && d.MipLevels == 1 && d.DepthOrArraySize == 1) {
-        char val[8] = {};
-        if (GetEnvironmentVariableA("X2W_XG_BC7_4K_S_LAYOUT", val, sizeof(val)) > 0 && val[0] == '1') {
-            return SW_4KB_S;
-        }
-    }
-    return SW_64KB_S;
+    return (layout & 0xFF00) == 0x100 ? (layout & 0xFF) : 0xFFu;
 }
 
 inline UINT gfx10_swizzle_block_log2(UINT mode)
@@ -175,11 +161,11 @@ struct Gfx10Texture {
     UINT tile_width = 0, tile_height = 0, tile_bytes = 0;
     UINT micro_w = 0, micro_h = 0;
     UINT first_tail = 0;
-    UINT total_slice_bytes = 0;
+    UINT64 total_slice_bytes = 0;
 
     std::array<UINT, 256> x_table{};
     std::array<UINT, 256> y_table{};
-    std::array<UINT, 16> mip_start{};
+    std::array<UINT64, 16> mip_start{};
     std::array<UINT, 16> tiles_w{};
     std::array<UINT, 16> tiles_h{};
     std::array<UINT, 16> tail_origin_x{};
@@ -190,6 +176,7 @@ struct Gfx10Texture {
         if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
         if (d.Width < 1 || d.Height < 1 || d.MipLevels < 1 || d.MipLevels > 16 || d.DepthOrArraySize < 1) return false;
         if (d.SampleDesc.Count != 1) return false;
+        if (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) return false;
         const auto fi = gfx10_format_info(d.Format);
         if (fi.bpe == 0) return false;
         const UINT mode = gfx10_swizzle_from_desc(d);
@@ -306,14 +293,14 @@ struct Gfx10Texture {
             }
         }
 
-        UINT offset = (first_tail < levels) ? tile_bytes : 0;
+        UINT64 offset = (first_tail < levels) ? tile_bytes : 0;
         for (int i = static_cast<int>(first_tail) - 1; i >= 0; --i) {
             const UINT cols = columns(static_cast<UINT>(i));
             const UINT r = rows(static_cast<UINT>(i));
             tiles_w[i] = (cols + tile_width - 1) / tile_width;
             tiles_h[i] = (r + tile_height - 1) / tile_height;
             mip_start[i] = offset;
-            offset += tiles_w[i] * tiles_h[i] * tile_bytes;
+            offset += UINT64{tiles_w[i]} * tiles_h[i] * tile_bytes;
         }
         total_slice_bytes = offset;
 
@@ -339,11 +326,13 @@ struct Gfx10Texture {
         tile_height = 1;
         tile_bytes = 256;
         first_tail = levels;
-        UINT offset = 0;
+        UINT64 offset = 0;
         for (int i = static_cast<int>(levels) - 1; i >= 0; --i) {
             const UINT cols = columns(static_cast<UINT>(i));
             const UINT r = rows(static_cast<UINT>(i));
-            const UINT pitch = ((cols * bpe + 255) / 256) * 256;
+            tiles_w[i] = (cols + tile_width - 1) / tile_width;
+            tiles_h[i] = r;
+            const UINT64 pitch = UINT64{tiles_w[i]} * 256;
             mip_start[i] = offset;
             offset += pitch * r;
         }
@@ -383,25 +372,26 @@ struct Gfx10Texture {
         return tiles_h[mip] * tile_height;
     }
 
-    UINT64 bytes() const { return UINT64{total_slice_bytes} * slices; }
+    UINT64 bytes() const { return total_slice_bytes * slices; }
     UINT64 slice_bytes() const { return total_slice_bytes; }
     UINT64 alignment() const { return (block_log2 > 0) ? (1ull << block_log2) : 256; }
-    UINT start(UINT mip) const { return mip_start[mip]; }
+    UINT64 start(UINT mip) const { return mip_start[mip]; }
 
-    UINT address(UINT mip, UINT x, UINT y, UINT slice) const
+    UINT64 address(UINT mip, UINT x, UINT y, UINT slice) const
     {
+        const UINT64 slice_base = UINT64{slice} * total_slice_bytes;
         if (swizzle_mode == SW_LINEAR) {
-            const UINT pitch = ((columns(mip) * bpe + 255) / 256) * 256;
-            return slice * total_slice_bytes + mip_start[mip] + y * pitch + x * bpe;
+            const UINT64 pitch = UINT64{tiles_w[mip]} * 256;
+            return slice_base + mip_start[mip] + UINT64{y} * pitch + UINT64{x} * bpe;
         }
         if (mip >= first_tail) {
             const UINT tx = tail_origin_x[mip] + x;
             const UINT ty = tail_origin_y[mip] + y;
-            return slice * total_slice_bytes + (x_table[tx] | y_table[ty]);
+            return slice_base + (x_table[tx] | y_table[ty]);
         }
-        const UINT tile_idx = (y / tile_height) * tiles_w[mip] + (x / tile_width);
+        const UINT64 tile_idx = UINT64{y / tile_height} * tiles_w[mip] + (x / tile_width);
         const UINT within = x_table[x % tile_width] | y_table[y % tile_height];
-        return slice * total_slice_bytes + mip_start[mip] + tile_idx * tile_bytes + within;
+        return slice_base + mip_start[mip] + tile_idx * tile_bytes + within;
     }
 
     template<bool into>
@@ -412,7 +402,7 @@ struct Gfx10Texture {
         for (UINT y = 0; y < r; ++y) {
             const std::size_t linear_row = static_cast<std::size_t>(y) * pitch;
             for (UINT x = 0; x < cols; ++x) {
-                const UINT tiled = address(mip, x, y, slice);
+                const UINT64 tiled = address(mip, x, y, slice);
                 const std::size_t linear = linear_row + static_cast<std::size_t>(x) * bpe;
                 if constexpr (into) {
                     std::memcpy(dst + tiled, src + linear, bpe);

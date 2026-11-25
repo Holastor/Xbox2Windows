@@ -1,9 +1,11 @@
 #include "startup_stubs/inflate.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -91,6 +93,45 @@ std::vector<std::uint8_t> dynamic_payload()
     return data;
 }
 
+bool check_fixed_multithreaded(const std::uint8_t* stream, std::size_t stream_size, const std::uint8_t* expected,
+                               std::size_t expected_size)
+{
+    constexpr int thread_count = 8;
+    std::atomic<int> ready_count{0};
+    std::atomic<bool> go{false};
+    std::array<std::uint8_t, thread_count> thread_ok{};
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count);
+
+    for (int t = 0; t < thread_count; ++t) {
+        workers.emplace_back([&, t]() {
+            std::vector<std::uint8_t> out(expected_size, 0xAA);
+            std::size_t out_size = 999;
+            ready_count.fetch_add(1, std::memory_order_release);
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            const InflateStatus status = inflate_zlib_ex(stream, stream_size, out.data(), out.size(), out_size);
+            thread_ok[static_cast<std::size_t>(t)] =
+                (status == InflateStatus::ok && out_size == expected_size &&
+                 std::memcmp(out.data(), expected, expected_size) == 0)
+                    ? 1
+                    : 0;
+        });
+    }
+
+    while (ready_count.load(std::memory_order_acquire) < thread_count) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+
+    for (auto& w : workers) w.join();
+
+    for (int t = 0; t < thread_count; ++t) {
+        if (!thread_ok[static_cast<std::size_t>(t)]) {
+            std::fprintf(stderr, "fixed_lit_multithreaded: thread %d failed\n", t);
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -157,6 +198,10 @@ int main()
     const std::vector<std::uint8_t> dyn_expected = dynamic_payload();
 
     bool ok = true;
+
+    // Multi-threaded fixed Huffman stress test (run before single-threaded fixed_block calls)
+    ok = ok && check_fixed_multithreaded(fixed_lit_stream, sizeof(fixed_lit_stream), fixed_lit_expected,
+                                         sizeof(fixed_lit_expected));
 
     // Exact-size buffer -> ok
     ok = ok && check_ok("stored", stored_stream, sizeof(stored_stream), stored_expected, sizeof(stored_expected));

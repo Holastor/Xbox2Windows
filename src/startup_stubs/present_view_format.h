@@ -41,4 +41,12 @@ inline DXGI_FORMAT present_view_format(DXGI_FORMAT format)
     default: return format;
     }
 }
+
+inline bool present_surface_supported(const D3D12_RESOURCE_DESC& desc)
+{
+    return desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+           desc.SampleDesc.Count == 1 && desc.Width != 0 && desc.Height != 0 &&
+           (desc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0 &&
+           present_view_format(desc.Format) != DXGI_FORMAT_UNKNOWN;
+}
 }  // namespace x2w_startup

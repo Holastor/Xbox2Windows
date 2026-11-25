@@ -28,7 +28,7 @@ long __stdcall gfx10_layout(Computer* self, unsigned char* out)
         const bool tail = level >= tex.first_tail;
         const UINT padded_columns = tex.padded_columns(level);
         const UINT padded_rows = tex.padded_rows(level);
-        const UINT span = tex.bpe * padded_columns * padded_rows;
+        const UINT64 span = UINT64{tex.bpe} * padded_columns * padded_rows;
         put64(mip, span);
         put64(mip + 8, tex.start(level));
         put64(mip + 0x10, span);
@@ -113,8 +113,8 @@ long __stdcall gfx10_tiling(Computer* self, UINT* tiles, D3D12_PACKED_MIP_INFO* 
 {
     const auto& desc = self->desc;
     const x2w_startup::Gfx10Texture tex(desc);
-    const UINT slice_tiles = static_cast<UINT>(tex.slice_bytes() / tex.tile_bytes);
-    if (tiles) *tiles = slice_tiles * desc.DepthOrArraySize;
+    const UINT64 slice_tiles = tex.slice_bytes() / tex.tile_bytes;
+    if (tiles) *tiles = static_cast<UINT>(slice_tiles * desc.DepthOrArraySize);
     if (packed) *packed = {static_cast<UINT8>(tex.first_tail),
                            static_cast<UINT8>(desc.MipLevels - tex.first_tail),
                            static_cast<UINT>(tex.first_tail < desc.MipLevels ? 1 : 0),
@@ -130,8 +130,8 @@ long __stdcall gfx10_tiling(Computer* self, UINT* tiles, D3D12_PACKED_MIP_INFO* 
             const UINT level = subresource % desc.MipLevels;
             if (level >= tex.first_tail) continue;
             if (tilings) {
-                const UINT start = (subresource / desc.MipLevels) * slice_tiles +
-                                   static_cast<UINT>(tex.start(level) / tex.tile_bytes);
+                const UINT start = static_cast<UINT>((subresource / desc.MipLevels) * slice_tiles +
+                                                     tex.start(level) / tex.tile_bytes);
                 tilings[i] = {tex.tiles_wide(level), static_cast<UINT16>(tex.tiles_high(level)), 1, start};
             }
             ++written;
