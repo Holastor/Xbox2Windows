@@ -52,6 +52,15 @@ int main()
     expect(store.set_one(1, 0, 0) == Result::stored && store.is_bound(1, 0, 1) && store.word(1, 0) == 0,
            "writing 0 is set, unlike never written");
 
+    // Capacity up to 32 words for native slot 86 root constants:
+    std::uint32_t data32[32]{};
+    for (unsigned i = 0; i < 32; ++i) data32[i] = i * 10;
+    expect(store.set(1, 32, data32, 0, 32) == Result::stored, "32 words stored with capacity 32");
+    expect(store.is_bound(1, 0, 32, 32), "all 32 words bound with capacity 32");
+    expect(store.word(1, 31) == 310, "last word reads back");
+    expect(store.set(1, 1, data32, 32, 32) == Result::dropped, "offset 32 dropped with capacity 32");
+    expect(store.set(1, 2, data32, 31, 32) == Result::truncated, "offset 31 count 2 truncated with capacity 32");
+
     store.clear();
     expect(store.word(3, 2) == 0 && store.word(15, 0) == 0, "clear zeroes every word");
     expect(!store.is_bound(3, 2, 4) && !store.is_bound(1, 0, 1), "clear forgets which words were set");
