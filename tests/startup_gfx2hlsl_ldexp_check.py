@@ -222,20 +222,15 @@ def check_negative_controls():
         G.Stage.op_v_ldexp_f32 = real_op
 
 
-def check_real_cache_sample():
-    # If the real request file from the shader cache exists locally, verify it decodes and translates
-    req_a = HERE.parent / 'out' / 'startup' / 'shader_cache' / 'req_12265051f3da290f.a'
-    if req_a.exists():
-        code = req_a.read_bytes()
-        ins = G.decode(code)
-        ldexp_found = any('v_ldexp_f32' in item[2] for item in ins)
-        assert ldexp_found, 'req_12265051f3da290f.a missing v_ldexp_f32'
-        st = make_stage('vs')
-        for _, _, base, asm in ins:
-            if 'v_ldexp_f32' in base:
-                name, ops, mods = G.parse(asm)
-                st.lower(base, asm, ops, mods)
-        assert any('ldexp32' in line for line in st.lines), 'ldexp32 missing from translated real shader stage'
+def check_decode_and_lower():
+    # Verify a synthetic VOP3A v_ldexp_f32 word decodes and lowers through Stage
+    code = vop3a(0x362, 5, 240, 130)
+    ins = G.decode(code)
+    assert len(ins) == 1 and ins[0][2] == 'v_ldexp_f32', f'unexpected decode: {ins}'
+    st = make_stage('vs')
+    name, ops, mods = G.parse(ins[0][3])
+    st.lower(ins[0][2], ins[0][3], ops, mods)
+    assert any('ldexp32' in line for line in st.lines), 'ldexp32 missing from lowered stage'
 
 
 def check_helper_parity():
@@ -319,7 +314,7 @@ def main():
     check_translations()
     check_refusals()
     check_negative_controls()
-    check_real_cache_sample()
+    check_decode_and_lower()
     print('gfx2hlsl v_ldexp_f32 lowering and refusal checks passed')
 
 
