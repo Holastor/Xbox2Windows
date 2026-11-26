@@ -1030,6 +1030,7 @@ bool retire_reasons_enabled();
 void retire_diag_note_release(Wrapper* w);
 void drop_mesh_lease_owner(Wrapper* w);
 void discard_mesh_lease_recording(ID3D12CommandList* list);
+void discard_upload_ring(ID3D12CommandList* list);
 void clear_unplaced_buffers(Wrapper* device);
 ULONG __stdcall release(Wrapper* self)
 {
@@ -1046,7 +1047,9 @@ ULONG __stdcall release(Wrapper* self)
                 linear_buffers().retire(static_cast<ID3D12Resource*>(self->own().real));
         }
         if (self->own().kind == list_kind && self->own().real) {
-            discard_mesh_lease_recording(static_cast<ID3D12CommandList*>(self->own().real));
+            auto* list = static_cast<ID3D12CommandList*>(self->own().real);
+            discard_mesh_lease_recording(list);
+            discard_upload_ring(list);
             retire_drop_recording(self);
         }
         if (self->own().kind == resource_kind && retire_reasons_enabled()) retire_diag_note_release(self);
@@ -2487,6 +2490,31 @@ void mark_upload_ring_untracked(const std::vector<ID3D12CommandList*>& lists)
     ReleaseSRWLockExclusive(&upload_ring_lock);
 }
 
+bool validate_and_note_upload_ring_use(ID3D12Resource* resource, u64 generation, ID3D12CommandList* list)
+{
+    if (!resource) return false;
+    AcquireSRWLockExclusive(&upload_ring_lock);
+    for (std::size_t i = 0; i < upload_ring_chunks.size(); ++i) {
+        if (upload_ring_chunks[i].resource == resource) {
+            if (upload_ring_chunks[i].generation != generation) {
+                ReleaseSRWLockExclusive(&upload_ring_lock);
+                return false;
+            }
+            if (list) {
+                auto& chunks = recorded_upload_chunks[list];
+                if (std::find(chunks.begin(), chunks.end(), i) == chunks.end()) {
+                    chunks.push_back(i);
+                    ++upload_ring_chunks[i].recordings;
+                }
+            }
+            ReleaseSRWLockExclusive(&upload_ring_lock);
+            return true;
+        }
+    }
+    ReleaseSRWLockExclusive(&upload_ring_lock);
+    return false;
+}
+
 void note_upload_ring_use(ID3D12Resource* resource, ID3D12CommandList* list)
 {
     if (!resource || !list) return;
@@ -2506,17 +2534,7 @@ void note_upload_ring_use(ID3D12Resource* resource, ID3D12CommandList* list)
 
 bool is_upload_chunk_generation_valid(ID3D12Resource* resource, u64 generation)
 {
-    if (!resource) return false;
-    AcquireSRWLockShared(&upload_ring_lock);
-    for (const auto& chunk : upload_ring_chunks) {
-        if (chunk.resource == resource) {
-            const bool valid = chunk.generation == generation;
-            ReleaseSRWLockShared(&upload_ring_lock);
-            return valid;
-        }
-    }
-    ReleaseSRWLockShared(&upload_ring_lock);
-    return false;
+    return validate_and_note_upload_ring_use(resource, generation, nullptr);
 }
 
 static bool is_upload_chunk_idle(const UploadRingChunk& chunk)

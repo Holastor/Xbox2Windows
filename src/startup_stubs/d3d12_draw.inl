@@ -1244,10 +1244,9 @@ bool frame_copy(u64 address, std::size_t bytes, u64* offset, ID3D12Resource** re
     const auto found = frame_copies().find(key);
     const bool known = found != frame_copies().end() && found->second.address == address && found->second.content.size() == bytes;
     if (known && std::memcmp(found->second.content.data(), title, bytes) == 0) {
-        if (is_upload_chunk_generation_valid(found->second.resource, found->second.generation)) {
+        if (validate_and_note_upload_ring_use(found->second.resource, found->second.generation, list)) {
             *offset = found->second.offset;
             if (resource) *resource = found->second.resource;
-            if (list && found->second.resource) note_upload_ring_use(found->second.resource, list);
             return true;
         }
     }
