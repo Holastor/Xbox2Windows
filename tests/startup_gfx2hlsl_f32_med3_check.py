@@ -33,7 +33,7 @@ text against the ISA rule, not against the instruction. This limit is recorded i
 
 Controls, all on the emitted HLSL text (no compiler, no GPU):
   - the preamble defines `med3_32` with the encoding test on all three sources, the `>` of `0x7f800000u` and
-    `min(min(a, b), c)` for the NaN branch; no line calls a `med3(` helper;
+    the signed-zero `minmax_zero32` min3 chain for the NaN branch; no line calls a `med3(` helper;
   - the binary32 table points `v_med3_f32` at `med3_32` and the integer forms are unchanged;
   - every lane of the fixture lowers to `U(med3_32(F(v1), F(v2), F(v3)))` reading s44..s47, which the entry
     constant buffer fills at draw time;
@@ -49,8 +49,9 @@ folded at compile time and the lowering under test would never run. The four inp
 NaN), 0x40400000 (3.0), 0x3fc00000 (1.5) and 0x3f000000 (0.5); the expected words are 0x3f800000 (1.0),
 0x40000000 (2.0), 0x3fc00000 (1.5) and 0x3f800000 (1.0).
 
-The control that counts: the branchless helper restored in the same pair must MISMATCH on the NaN lane, with
-0x40000000 where the ISA asks 0x3f800000, and match the other three lanes. A draw whose negative control
+The control that counts: the branchless helper restored in the same pair, computed as `precise`, must MISMATCH on
+the NaN lane, with 0x40000000 where the ISA asks 0x3f800000, and match the other three lanes. Without `precise`
+a driver may fold the median against the constant bounds into a clamp and draw the ISA's 0x3f800000 there (#2730). A draw whose negative control
 passes proves nothing; this check reports that as a failure rather than accepting it.
 
 The instruction words are constructed here from the field layout the checked-in decoder reads
@@ -87,9 +88,16 @@ BRANCHLESS_NAN = 0x40000000
 
 MED3_32 = ('float med3_32(float a, float b, float c) {\n'
            '    uint top = max(max(asuint(a) & 0x7fffffffu, asuint(b) & 0x7fffffffu), asuint(c) & 0x7fffffffu);\n'
-           '    return top > 0x7f800000u ? min(min(a, b), c) : max(min(a, b), min(max(a, b), c));\n'
+           '    return top > 0x7f800000u\n'
+           '        ? minmax_zero32(minmax_zero32(a, b, false), c, false)\n'
+           '        : minmax_zero32(minmax_zero32(a, b, false), minmax_zero32(minmax_zero32(a, b, true), c, false), true);\n'
            '}')
 BRANCHLESS = 'float med3_32(float a, float b, float c) {\n    return max(min(a, b), min(max(a, b), c));\n}'
+# The draw control is the same helper computed as `precise`. Without it, a driver may fold the median against the
+# fixture's constant bounds into a clamp whose NaN result is the ISA's: an RX 5700 XT drew 0x3f800000 on the NaN
+# lane, so the defect escaped (#2730). `precise` keeps D3D's min/max NaN rule, so the NaN lane draws 2.0.
+BRANCHLESS_DRAW = ('float med3_32(float a, float b, float c) {\n'
+                   '    precise float r = max(min(a, b), min(max(a, b), c));\n    return r;\n}')
 OLD_ISNAN = ('float med3_32(float a, float b, float c) {\n'
              '    return isnan(a) || isnan(b) || isnan(c) ? min(min(a, b), c)'
              ' : max(min(a, b), min(max(a, b), c));\n}')
@@ -309,8 +317,8 @@ def actual_words(run):
 
 
 def naive(hlsl):
-    """The branchless helper restored, the table still calling med3_32."""
-    return hlsl.replace(MED3_32, BRANCHLESS)
+    """The branchless helper restored as `precise` (BRANCHLESS_DRAW), the table still calling med3_32."""
+    return hlsl.replace(MED3_32, BRANCHLESS_DRAW)
 
 
 def check_draw(dxc, renderer, adapter, fxc=None):
