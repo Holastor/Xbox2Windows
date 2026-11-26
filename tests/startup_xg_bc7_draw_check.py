@@ -78,6 +78,47 @@ def check(work, consumer, dxc, backend):
                                   f"read {actual[first:first + 4].hex()}, expected {reference[first:first + 4].hex()}")
             else:
                 print(f"{backend}: {width}x{height} {layout} draw matched all {width * height} reference pixels")
+
+    # Non-BC upload test (RGBA8 layout 0x105, 4KB_S) and negative swizzle control.
+    rgba8_reference = bytearray(64 * 64 * 4)
+    for y in range(64):
+        for x in range(64):
+            idx = (y * 64 + x) * 4
+            rgba8_reference[idx:idx + 4] = bytes(((x * 4 + 7) & 255, (y * 4 + 13) & 255, (x ^ y ^ 0xA5) & 255, 255))
+    upload.write_bytes(rgba8_reference)
+
+    # 1. Tiled upload via XG slot 8 into 0x105, detiled by upload_texture via is_gfx10_tiled.
+    if image.exists():
+        image.unlink()
+    result = subprocess.run(base + ["64", "64", "rgba8_4k_s"], env=env, capture_output=True, text=True)
+    print(result.stdout, end="")
+    for line in result.stderr.splitlines():
+        if "debug layer:" in line or "x2w-d3d12-debug " in line:
+            print(line)
+    if result.returncode or "-> drawn;" not in result.stderr:
+        raise RuntimeError(f"{backend} 64x64 rgba8_4k_s draw failed ({result.returncode})\n{result.stderr}")
+    actual = image.read_bytes()
+    assert len(actual) == len(rgba8_reference), f"rgba8_4k_s: read {len(actual)} bytes, expected {len(rgba8_reference)}"
+    if actual != rgba8_reference:
+        first = next(i for i in range(0, len(rgba8_reference), 4) if actual[i:i + 4] != rgba8_reference[i:i + 4])
+        x, y = first // 4 % 64, first // 4 // 64
+        mismatches.append(f"{backend} 64x64 rgba8_4k_s: pixel ({x}, {y}) "
+                          f"read {actual[first:first + 4].hex()}, expected {rgba8_reference[first:first + 4].hex()}")
+    else:
+        print(f"{backend}: 64x64 rgba8_4k_s draw matched all {64 * 64} reference pixels")
+
+    # 2. Negative control: linear / untiled data placed in 0x105 buffer must fail to match reference.
+    if image.exists():
+        image.unlink()
+    result = subprocess.run(base + ["64", "64", "rgba8_4k_s_untiled"], env=env, capture_output=True, text=True)
+    if result.returncode or "-> drawn;" not in result.stderr:
+        raise RuntimeError(f"{backend} 64x64 rgba8_4k_s_untiled draw failed ({result.returncode})\n{result.stderr}")
+    actual_untiled = image.read_bytes()
+    assert actual_untiled != rgba8_reference, f"{backend}: negative control failed, untiled draw unexpectedly matched reference"
+    diff_count = sum(actual_untiled[i:i + 4] != rgba8_reference[i:i + 4] for i in range(0, len(rgba8_reference), 4))
+    assert diff_count >= 3000, f"{backend}: negative control only differed on {diff_count}/4096 pixels"
+    print(f"{backend}: 64x64 rgba8_4k_s negative swizzle control confirmed ({diff_count}/4096 pixels differ)")
+
     if mismatches:
         raise AssertionError("\n".join(mismatches))
     return 0

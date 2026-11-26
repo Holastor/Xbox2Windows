@@ -578,6 +578,7 @@ int gfx10_tiling_reference()
         {"BGRA8 64x64 3m 4KB_S",  DXGI_FORMAT_B8G8R8A8_UNORM, ADDR_FMT_8_8_8_8, 32, 64, 64, 3, 1, 0x105, ADDR_SW_4KB_S},
         {"RGBA16 64x64 3m 64KB_D", DXGI_FORMAT_R16G16B16A16_FLOAT, ADDR_FMT_16_16_16_16, 64, 64, 64, 3, 1, 0x10A, ADDR_SW_64KB_D},
         {"RGBA32 32x32 3m 4KB_S", DXGI_FORMAT_R32G32B32A32_FLOAT, ADDR_FMT_32_32_32_32, 128, 32, 32, 3, 1, 0x105, ADDR_SW_4KB_S},
+        {"RGBA8 64x64 3m LINEAR", DXGI_FORMAT_R8G8B8A8_UNORM, ADDR_FMT_8_8_8_8, 32, 64, 64, 3, 1, 0x100, ADDR_SW_LINEAR},
     };
 
     for (const auto& c : cases) {
@@ -614,11 +615,12 @@ int gfx10_tiling_reference()
         out.pMipInfo = mip_info.data();
 
         const ADDR_E_RETURNCODE rc = Addr2ComputeSurfaceInfo(lib, &in, &out);
+        const bool is_linear = (c.mode == ADDR_SW_LINEAR);
         bool ok = rc == ADDR_OK && out.surfSize == tex.bytes() && out.sliceSize == tex.slice_bytes() &&
-                  out.baseAlign == tex.alignment() && out.firstMipIdInTail == tex.first_tail;
+                  out.baseAlign == tex.alignment() && (is_linear || out.firstMipIdInTail == tex.first_tail);
         if (ok) {
             for (UINT_32 m = 0; m < c.mips; ++m) {
-                const UINT64 expected_off = (m < tex.first_tail) ? mip_info[m].macroBlockOffset : mip_info[m].offset;
+                const UINT64 expected_off = (is_linear || m < tex.first_tail) ? mip_info[m].macroBlockOffset : mip_info[m].offset;
                 if (expected_off != tex.start(m)) {
                     std::printf("FAIL %s mip %u offset: addrlib=%llu tex=%llu\n", c.name, m,
                                 static_cast<unsigned long long>(expected_off),

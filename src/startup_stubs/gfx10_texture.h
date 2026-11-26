@@ -5,7 +5,7 @@
 // The micro-tile patterns, macro-tile dimensions, and mip-tail calculations
 // follow AMD's addrlib in Mesa (src/amd/addrlib, SPDX: MIT):
 //
-//   Copyright (C) 2007-2026 Advanced Micro Devices, Inc. All rights reserved.
+//   Copyright (C) 2007-2024 Advanced Micro Devices, Inc. All rights reserved.
 //   SPDX-License-Identifier: MIT
 
 #include <d3d12.h>

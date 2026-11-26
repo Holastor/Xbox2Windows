@@ -1367,6 +1367,13 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
         if (!rows_match) return true;
     }
     const x2w_startup::Gfx10Texture gfx10_tex = is_gfx10_tiled ? x2w_startup::Gfx10Texture(original->console) : x2w_startup::Gfx10Texture{};
+    if (is_gfx10_tiled) {
+        bool rows_match = gfx10_tex.levels == mips && gfx10_tex.slices == slices && plan.count == mips;
+        for (UINT i = 0; rows_match && i < mips; ++i)
+            rows_match = plan.bytes(i) && plan.rows[i] == gfx10_tex.rows(i) &&
+                         plan.row_bytes[i] == u64{gfx10_tex.columns(i)} * gfx10_tex.bpe;
+        if (!rows_match) return true;
+    }
     const u64 total = is_gfx10_tiled ? gfx10_tex.bytes()
         : tiled_chain ? x2w_startup::bc64::Chain(original->console).bytes()
         : console ? console_layout->bytes()
