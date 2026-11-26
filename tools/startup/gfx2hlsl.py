@@ -2520,7 +2520,7 @@ class Stage:
             text = 'F(%s)' % self.u(tok)
         if absolute:
             text = 'abs(%s)' % text
-        return '(-%s)' % text if neg else text
+        return ('(-(%s))' % text) if (neg and text.startswith('-')) else ('(-%s)' % text if neg else text)
 
     def is_const(self, n):
         s = self.sym.get(n)
@@ -4936,7 +4936,7 @@ class Stage:
     # proved whole-quad EXEC: the hardware can return 0 or the old value for a source lane whose EXEC bit
     # is off (an uncovered pixel of an edge quad), and the intrinsics have no such case. Other permutations, fi:1 without that proof, DPP8, row shifts and partial masks stay refused.
     def dpp(self, base, ops, mods):
-        if base in VOP3_ONLY_VEC_U:
+        if base in ('v_ldexp_f32', *VOP3_ONLY_VEC_U):
             raise Unsupported('DPP form of %s' % base)
         # fi:1 (fetch inactive, DPP16 dword bit 18; LLVM AMDGPU `fi`, Mesa ACO fetch_inactive) only decides what a
         # disabled source lane returns. Every lowering below is taken only with the whole quad proven active, so no
@@ -5030,7 +5030,7 @@ class Stage:
             text = 'f16tof32(%s & 0xffffu)' % self.u(tok)
         if absolute:
             text = 'abs(%s)' % text
-        return '(-%s)' % text if neg else text
+        return ('(-(%s))' % text) if (neg and text.startswith('-')) else ('(-%s)' % text if neg else text)
 
     def half_alu(self, base, ops, mods):
         """16-bit VALU: operands are the low 16 bits, the result fills the low 16 bits and zeroes the rest (RDNA 2)."""

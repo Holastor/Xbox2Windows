@@ -3,6 +3,7 @@
 Refs #2618.
 """
 from pathlib import Path
+import re
 import struct
 import sys
 
@@ -41,6 +42,12 @@ def check_translations():
     # Negation on inline float
     hlsl_neg = translate_cs(vop3a(0x362, 5, 240, 130, neg=1))
     assert 'v5 = U(ldexp32(-0.5, asint(0x00000002u)));' in hlsl_neg, f'unexpected neg: {hlsl_neg}'
+
+    # Negation on negative inline float -0.5 (encoding 241):
+    # Must format as (-(-0.5)) to avoid HLSL pre-decrement syntax (--0.5)
+    hlsl_neg_minus_half = translate_cs(vop3a(0x362, 5, 241, 130, neg=1))
+    assert 'v5 = U(ldexp32((-(-0.5)), asint(0x00000002u)));' in hlsl_neg_minus_half, f'unexpected neg -0.5: {hlsl_neg_minus_half}'
+    assert '--0.5' not in hlsl_neg_minus_half, f'decrement operator found in hlsl: {hlsl_neg_minus_half}'
 
     # Negation on VGPR src0
     hlsl_vneg = translate_cs(vop3a(0x362, 5, 257, 130, neg=1))
@@ -150,7 +157,8 @@ def check_refusals():
     for asm, expected in (
         ('v_ldexp_f32_e32 v0, v1, v2', 'v_ldexp_f32_e32'),
         ('v_ldexp_f32_sdwa v0, v1, v2', 'SDWA form of v_ldexp_f32'),
-        ('v_ldexp_f32_dpp v0, v1, v2', 'v_ldexp_f32_dpp'),
+        ('v_ldexp_f32_dpp v0, v1, v2', 'DPP form of v_ldexp_f32'),
+        ('v_ldexp_f32_dpp v0, v1, v2 quad_perm:[1,1,3,3] row_mask:0xf bank_mask:0xf', 'DPP form of v_ldexp_f32'),
     ):
         try:
             lower_inst(asm)
@@ -230,7 +238,84 @@ def check_real_cache_sample():
         assert any('ldexp32' in line for line in st.lines), 'ldexp32 missing from translated real shader stage'
 
 
+def check_helper_parity():
+    # Verify exact parity between the ldexp32 definition in Pipeline.common() and tools/pixel_aot.py
+    pixel_aot_path = HERE.parent / 'tools' / 'pixel_aot.py'
+    pixel_aot_text = pixel_aot_path.read_text(encoding='utf-8')
+    m_aot = re.search(r'float ldexp32\(float value, int delta\) \{.*?^\}', pixel_aot_text, re.M | re.S)
+    assert m_aot, 'ldexp32 helper missing from tools/pixel_aot.py'
+    aot_ldexp = m_aot.group(0)
+
+    pipe = G.ComputePipeline(b'', C.root_blob(), C.CASES['A'][2], (1, 1, 1))
+    common_text = '\n'.join(pipe.common())
+    m_gfx = re.search(r'float ldexp32\(float value, int delta\) \{.*?^\}', common_text, re.M | re.S)
+    assert m_gfx, 'ldexp32 helper missing from Pipeline.common()'
+    gfx_ldexp = m_gfx.group(0)
+
+    def normalize(code):
+        return [line.strip() for line in code.splitlines() if line.strip()]
+
+    assert normalize(gfx_ldexp) == normalize(aot_ldexp), (
+        'ldexp32 in gfx2hlsl Pipeline.common() does not match tools/pixel_aot.py'
+    )
+
+    # Negative control: an altered helper fails parity
+    mutant = gfx_ldexp.replace('clamp(delta, -512, 512)', 'delta')
+    assert normalize(mutant) != normalize(aot_ldexp), 'mutant failed to differ from pixel_aot.py'
+
+    # Pure-Python simulation of ldexp32 logic on edge cases
+    def ldexp32_sim(bits, delta):
+        sign = bits & 0x80000000
+        exp = (bits >> 23) & 0xff
+        mant = bits & 0x7fffff
+        if exp == 0xff or (exp == 0 and mant == 0):
+            return bits
+        e = exp
+        if exp == 0:
+            shift = 23 - (mant.bit_length() - 1)
+            mant = (mant << shift) & 0x7fffff
+            e = 1 - shift
+        e += max(-512, min(512, delta))
+        if e >= 255:
+            return sign | 0x7f800000
+        if e <= 0:
+            if e < -23:
+                return sign
+            full = mant | 0x800000
+            shift = 1 - e
+            half_bit = 1 << (shift - 1)
+            mask = (1 << shift) - 1
+            rem = full & mask
+            q = full >> shift
+            if rem > half_bit or (rem == half_bit and (q & 1) != 0):
+                q += 1
+            return sign | q
+        return sign | (e << 23) | mant
+
+    def f2u(f): return struct.unpack('<I', struct.pack('<f', f))[0]
+    def u2f(u): return struct.unpack('<f', struct.pack('<I', u))[0]
+
+    # Normal scaling
+    assert u2f(ldexp32_sim(f2u(1.0), 1)) == 2.0
+    assert u2f(ldexp32_sim(f2u(1.0), -1)) == 0.5
+    # Signed zero preserved
+    assert ldexp32_sim(f2u(0.0), 10) == f2u(0.0)
+    assert ldexp32_sim(f2u(-0.0), 10) == f2u(-0.0)
+    # Infinity and NaN preserved
+    assert ldexp32_sim(0x7f800000, 10) == 0x7f800000
+    assert ldexp32_sim(0xff800000, -10) == 0xff800000
+    assert ldexp32_sim(0x7fc00001, 5) == 0x7fc00001
+    # Clamping overflow and underflow
+    assert ldexp32_sim(f2u(1.0), 1000) == 0x7f800000
+    assert ldexp32_sim(f2u(1.0), -1000) == 0
+    # Subnormal 2^-150 tie to even (q=0 is even -> rounds to 0)
+    assert ldexp32_sim(f2u(1.0), -150) == 0
+    # Subnormal 1.5 * 2^-150 rounds up to 1 ULP
+    assert ldexp32_sim(f2u(1.5), -150) == 1
+
+
 def main():
+    check_helper_parity()
     check_translations()
     check_refusals()
     check_negative_controls()
