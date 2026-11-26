@@ -1648,6 +1648,7 @@ bool submit_fence_fails()
 // the queue must pass before the allocator can be reset. If that fence cannot be created or
 // signalled, the work is on the GPU all the same: the allocators are marked untracked instead.
 void note_upload_ring_submits(ID3D12Fence* fence, UINT64 value, const std::vector<ID3D12CommandList*>& lists);
+void mark_upload_ring_untracked(const std::vector<ID3D12CommandList*>& lists);
 void discard_upload_ring(ID3D12CommandList* list);
 
 void note_submits(ID3D12CommandQueue* queue, const std::vector<Wrapper*>& lists, const std::vector<ID3D12CommandList*>& native_lists)
@@ -1672,6 +1673,7 @@ void note_submits(ID3D12CommandQueue* queue, const std::vector<Wrapper*>& lists,
             else same->second = value;
         }
     } else {
+        mark_upload_ring_untracked(native_lists);
         for (Wrapper* list : lists)
             if (const auto found = list_recordings.find(list); found != list_recordings.end()) found->second->untracked = true;
         static LONG failures;
@@ -2469,6 +2471,21 @@ void discard_upload_ring(ID3D12CommandList* list)
     ReleaseSRWLockExclusive(&upload_ring_lock);
 }
 
+void mark_upload_ring_untracked(const std::vector<ID3D12CommandList*>& lists)
+{
+    AcquireSRWLockExclusive(&upload_ring_lock);
+    for (ID3D12CommandList* list : lists) {
+        const auto it = recorded_upload_chunks.find(list);
+        if (it == recorded_upload_chunks.end()) continue;
+        for (std::size_t chunk_idx : it->second) {
+            if (chunk_idx < upload_ring_chunks.size()) {
+                upload_ring_chunks[chunk_idx].untracked = true;
+            }
+        }
+    }
+    ReleaseSRWLockExclusive(&upload_ring_lock);
+}
+
 void note_upload_ring_use(ID3D12Resource* resource, ID3D12CommandList* list)
 {
     if (!resource || !list) return;
@@ -2593,16 +2610,14 @@ UploadReservation reserve_upload_ring(std::size_t bytes, ID3D12CommandList* list
     for (std::size_t step = 0; step < upload_ring_chunks.size(); ++step) {
         const std::size_t index = (upload_ring_active + 1 + step) % upload_ring_chunks.size();
         auto& chunk = upload_ring_chunks[index];
-        if (is_upload_chunk_idle(chunk)) {
+        if (chunk.capacity >= rounded && is_upload_chunk_idle(chunk)) {
             reset_upload_chunk(chunk);
-            if (chunk.capacity >= rounded) {
-                reservation = reserve_upload_chunk(chunk, rounded);
-                if (reservation.mapped) {
-                    upload_ring_active = index;
-                    note_list(upload_ring_active);
-                    ReleaseSRWLockExclusive(&upload_ring_lock);
-                    return reservation;
-                }
+            reservation = reserve_upload_chunk(chunk, rounded);
+            if (reservation.mapped) {
+                upload_ring_active = index;
+                note_list(upload_ring_active);
+                ReleaseSRWLockExclusive(&upload_ring_lock);
+                return reservation;
             }
         }
     }

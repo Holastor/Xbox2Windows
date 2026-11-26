@@ -14,6 +14,7 @@ struct UploadRingChunk {
     std::uint64_t used = 0;
     std::size_t recordings = 0;
     std::uint64_t generation = 0;
+    bool untracked = false;
     std::vector<std::pair<ID3D12Fence*, std::uint64_t>> submits{};
 };
 
@@ -36,13 +37,18 @@ inline UploadReservation reserve_upload_chunk(UploadRingChunk& chunk, std::uint6
 template<typename FenceQuery>
 inline bool is_upload_chunk_idle(const UploadRingChunk& chunk, FenceQuery&& query)
 {
-    if (chunk.recordings != 0) return false;
+    if (chunk.untracked || chunk.recordings != 0) return false;
     for (const auto& submit : chunk.submits) {
         if (!submit.first) return false;
         const auto completed = query(submit.first);
         if (completed == UINT64_MAX || completed < submit.second) return false;
     }
     return true;
+}
+
+inline bool is_upload_chunk_generation_valid(const UploadRingChunk& chunk, std::uint64_t generation)
+{
+    return chunk.generation == generation;
 }
 
 inline void reset_upload_chunk(UploadRingChunk& chunk)

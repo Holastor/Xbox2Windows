@@ -69,6 +69,8 @@ int main()
     const auto recycled = reserve_upload_chunk(chunks[0], kAlign);
     check(recycled.mapped == storage_a && recycled.offset == 0 && recycled.generation == 1,
           "recycled chunk reserves from start with incremented generation");
+    check(is_upload_chunk_generation_valid(chunks[0], 1), "generation validation matches incremented generation");
+    check(!is_upload_chunk_generation_valid(chunks[0], 0), "generation validation rejects stale generation");
 
     // Guard fence logic, recording holds and device removal:
     struct MockFence {
@@ -86,6 +88,9 @@ int main()
     check(!is_upload_chunk_idle(chunks[0], fence_query), "closed list still held cannot be recycled");
 
     chunks[0].recordings = 0;
+    chunks[0].untracked = true;
+    check(!is_upload_chunk_idle(chunks[0], fence_query), "untracked chunk after failed submit fence cannot be recycled");
+    chunks[0].untracked = false;
     chunks[0].submits.emplace_back(reinterpret_cast<ID3D12Fence*>(&fence_a), 10);
     fence_a.completed = 9;
     check(!is_upload_chunk_idle(chunks[0], fence_query), "chunk with in-flight submit is not idle");
