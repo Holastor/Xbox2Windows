@@ -2225,13 +2225,25 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
     const bool indices_ok = indexed && !indirect && pass.ib.BufferLocation && readable_window(index_address, index_total) >= index_total;
     D3D12_INDEX_BUFFER_VIEW live_indices{};
     ID3D12Resource* live_index_resource = nullptr;
+    const auto stream_needs_slicing = [&](const Translation::Srv& srv) {
+        if (srv.source != 1) return false;
+        if (srv.a < 0 || srv.a >= 8) return true;
+        const auto bytes = pass.vb[srv.a].SizeInBytes;
+        if (!bytes) return false;
+        const auto& placed = pass.placed_vb[srv.a];
+        const u64 address = pass.vb[srv.a].BufferLocation;
+        if (!placed.alias || placed.reject || !placed.owner) return true;
+        if (!InterlockedCompareExchange(&placed.owner->own().refs, 0, 0)) return true;
+        if (address % D3D12_RAW_UAV_SRV_BYTE_ALIGNMENT != 0 || bytes % 4 != 0) return true;
+        return false;
+    };
     // A vertex-stream SRV uses the recording-time index scan to size and rebase its view.
     // For other draws, a live alias lets IA observe legal CPU writes made before submission.
     if (indices_ok && index_total && index_address >= pass.ib.BufferLocation &&
         (pass.ib.Format == DXGI_FORMAT_R16_UINT || pass.ib.Format == DXGI_FORMAT_R32_UINT) &&
         index_address % index_bytes == 0 && index_start <= pass.ib.SizeInBytes &&
         index_total <= pass.ib.SizeInBytes - index_start &&
-        std::none_of(tr->srvs.begin(), tr->srvs.end(), [](const Translation::Srv& srv) { return srv.source == 1; })) {
+        std::none_of(tr->srvs.begin(), tr->srvs.end(), stream_needs_slicing)) {
         const auto placed = placed_buffer_range(self->own().list_device, index_address, index_total);
         if (!placed.reject && placed.alias && InterlockedCompareExchange(&placed.owner->own().refs, 0, 0)) {
             const auto base = reinterpret_cast<u64>(placed.owner->own().title_memory);
@@ -2277,6 +2289,9 @@ bool draw_translated(Wrapper* self, bool indexed, UINT count, UINT instances, UI
                 const u64 wanted = u64{vertex_count} * strides[i];
                 address += skip;
                 bytes = static_cast<std::size_t>(wanted < bytes - skip ? wanted : bytes - skip);
+            }
+            if (live_index_resource && placed.alias) {
+                retain_with_recording(self, x2w_startup::ComPtr<ID3D12Resource>(placed.alias));
             }
         } else if (srv.source == 2 && srv.a < 16) {
             address = pass.root_address[srv.a];
