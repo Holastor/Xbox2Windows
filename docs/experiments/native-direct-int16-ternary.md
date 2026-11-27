@@ -31,10 +31,10 @@ existing common rule.
 (`ctest --preset dev --no-tests=error -R '^native_int16_ternary_' -V`). The words were assembled with LLVM 15.0.7
 (`clang -cc1as -triple amdgcn -target-cpu gfx1013 -filetype asm -show-encoding`).
 
-- **Dispatch:** two groups of 32 lanes (64 lanes total). With $G = \text{lane} + 32 \times \text{group}$:
-  - $S_0 = \text{mul\_u32\_u24}(G, 0x05F3D1) \oplus 0xA5800000$
-  - $S_1 = \text{mul\_u32\_u24}(G, 0x000371) \oplus 0x7F9ABCDE$
-  - $S_2 = \text{mul\_u32\_u24}(G, 0x001001) \oplus 0x80007FFF$
+- **Dispatch:** two groups of 32 lanes (64 lanes total). With G = lane + 32 * group:
+  - S0 = mul_u32_u24(G, 0x05f3d1) ^ 0xa5800000
+  - S1 = mul_u32_u24(G, 0x000371) ^ 0x7f9abcde
+  - S2 = mul_u32_u24(G, 0x001001) ^ 0x80007fff
   Both halves are nonzero, values cross the 16-bit signed boundary (0x8000), 63 of 64 lanes wrap mad modulo $2^{16}$,
   and all permutations of signed and unsigned orders are exercised.
 - **Destinations:** destination registers `v10` through `v17` are preloaded with `0xcafebabe`. Each lane writes all
