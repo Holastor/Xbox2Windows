@@ -6604,7 +6604,7 @@ class Stage:
     def op_s_buffer_load_dwordx16(self, ops, mods):
         self.op_s_buffer_load_dword(ops, mods, 16)
 
-    def buffer_address(self, ops, mods):
+    def buffer_address(self, ops, mods, *, is_formatted=False):
         # MUBUF and MTBUF share the same address calculation: optional index * stride (idxen),
         # optional byte VGPR offset (offen), scalar byte offset (soffset) and 12-bit immediate
         # offset. Cache-policy flags (glc, slc, dlc) do not change the loaded bytes; lds, tfe
@@ -6617,7 +6617,12 @@ class Stage:
                 raise Unsupported('buffer modifier %s' % m)
         if len(ops) != 4:
             raise Unsupported('buffer load with %d operands, expected 4' % len(ops))
-        key = self.descriptor(ops[2])
+        idxen, offen = 'idxen' in mods, 'offen' in mods
+        what = 'indexed load' if idxen else 'buffer load'
+        if not is_formatted:
+            key = self.load_descriptor(ops[2], what, stride0_ok=not idxen, raw_conversion_ok=not idxen)
+        else:
+            key = self.descriptor(ops[2])
         buf = self.pipe.resource(key, 'buf')
         soffset = None
         if re.fullmatch(r'0x[0-9a-f]+|\d+', ops[3]):
@@ -6627,10 +6632,9 @@ class Stage:
             if not sreg or sreg[0] != 's' or sreg[1] != sreg[2] or sreg[1] > 105:
                 raise Unsupported('buffer soffset %s' % ops[3])
             soffset = self.S(sreg[1])
-        idxen, offen = 'idxen' in mods, 'offen' in mods
         terms = []
         if idxen and offen:
-            if key in self.pipe.modified:
+            if key in getattr(self.pipe, 'modified', ()):
                 raise Unsupported('indexed load through a modified descriptor')
             r = reg_range(ops[1])
             if not r or r[0] != 'v' or r[2] - r[1] != 1 or r[2] > 255:
@@ -6639,7 +6643,7 @@ class Stage:
             terms.append('%s * ud%d' % (self.u('v%d' % r[1]), stride))
             terms.append(self.u('v%d' % r[2]))
         elif idxen:
-            if key in self.pipe.modified:
+            if key in getattr(self.pipe, 'modified', ()):
                 raise Unsupported('indexed load through a modified descriptor')
             r = reg_range(ops[1])
             if not r or r[0] != 'v' or r[1] != r[2] or r[1] > 255:
@@ -6789,6 +6793,37 @@ class Stage:
         self.emit('a = (%s%d) & 0xfffffffcu;' % (soffset, offset) if soffset else 'a = %d;' % offset)
         self.emit(store if self.exec_known else 'if (exec & 1) %s' % store)
 
+    def load_descriptor(self, tok, what, *, stride0_ok=False, raw_conversion_ok=False):
+        """Resource key for a 4-word buffer load descriptor operand, checking for unproved modifications.
+
+        A descriptor modification is accepted only for proven safe transformations:
+        - stride0_ok: Allows word 1 (STRIDE[29:16]) to be zeroed via `s_and_b32 ... 0xc000ffff`.
+          Permitted on non-indexed buffer loads (offen or off) where byte addressing is used and
+          the hardware stride field is not consulted.
+        - raw_conversion_ok: Allows the complete RDNA2 structured-to-raw buffer conversion:
+          word 1 stride zeroed (`stride0`), word 2 scaled by the extracted stride (`byte_count`),
+          and word 3 OOB_SELECT set to raw mode (`oob3` via 0x30000000). Permitted when the load
+          is non-indexed and the resulting byte range is validated.
+        Any other scalar ALU modifications or unproven overwrites raise Unsupported.
+        """
+        key = self.descriptor(tok)
+        rsrc = reg_range(tok)
+        first = self.sym.get(rsrc[1]) if rsrc and rsrc[0] == 's' and rsrc[2] - rsrc[1] == 3 else None
+        if first and first[0] == 'desc':
+            loaded = tuple(desc_word(first, first[3] + k) for k in range(4))
+            actual = tuple(self.sym.get(rsrc[1] + k) for k in range(4))
+            valid = names_one_value(first) and actual == loaded
+            if names_one_value(first) and stride0_ok:
+                cleared = loaded[1] + ('stride0',)
+                valid = valid or actual == (loaded[0], cleared, *loaded[2:])
+                if not valid and raw_conversion_ok:
+                    valid = actual == (loaded[0], cleared, loaded[2] + ('byte_count',), loaded[3] + ('oob3',))
+            if (not valid or key in getattr(self.pipe, 'other_modified', ())
+                    or (key in getattr(self.pipe, 'modified', ()) and not stride0_ok)):
+                raise Unsupported('%s through a modified descriptor' % what)
+            return key
+        return key
+
     def store_descriptor(self, tok, words, what, stride0_ok=False, raw_conversion_ok=False):
         """Resource key for a single loaded descriptor or a proven raw transformation of it."""
         rsrc = reg_range(tok)
@@ -6805,7 +6840,7 @@ class Stage:
             if not valid and raw_conversion_ok:
                 valid = actual == (loaded[0], cleared, loaded[2] + ('byte_count',), loaded[3] + ('oob3',))
         if (not valid or key in getattr(self.pipe, 'other_modified', ())
-                or (key in self.pipe.modified and not stride0_ok)):
+                or (key in getattr(self.pipe, 'modified', ()) and not stride0_ok)):
             raise Unsupported('%s through a modified descriptor' % what)
         return key
 
@@ -7199,7 +7234,7 @@ class Stage:
         For compute, the caller must validate the native descriptor and reachable byte addresses, and bind the
         SRV and entry constants from that same descriptor snapshot.
         """
-        buf, address = self.buffer_address(ops, mods)
+        buf, address = self.buffer_address(ops, mods, is_formatted=True)
         dst = reg_range(ops[0])
         if not dst or dst[0] != 'v' or dst[2] - dst[1] + 1 != count or dst[2] > 255:
             raise Unsupported('formatted buffer load destination %s for %d components' % (ops[0], count))
