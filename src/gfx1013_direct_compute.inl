@@ -1926,6 +1926,39 @@ struct DirectCompute {
                 if (n[5] == '3')
                     z = bound(z, val(2), minimum);
             }
+        } else if (!scalar && (n == "v_mad_u16" || n == "v_mad_i16" ||
+                               n == "v_min3_u16" || n == "v_min3_i16" ||
+                               n == "v_max3_u16" || n == "v_max3_i16" ||
+                               n == "v_med3_u16" || n == "v_med3_i16")) {
+            // Three-operand 16-bit integer VOP3 operations (#669): each computes D[15:0] from
+            // S0[15:0], S1[15:0] and S2[15:0], and D[31:16] keeps its value (measured on RDNA 2
+            // silicon; LLVM GCNSubtarget: "On gfx10, all 16-bit instructions preserve the high bits").
+            // op_sel would select other halves and stays refused. Modifiers (clamp, scale, neg, abs)
+            // are refused by the path's common rule.
+            if (i.wide && (i.a & 0x7800))
+                refuse(i.pc, "unsupported " + string(n) + " op_sel");
+            auto low = [&](const string &x) { return ir.binary("and", x, "65535"); };
+            auto sext = [&](const string &x) { return ir.binary("ashr", ir.binary("shl", x, "16"), "16"); };
+            auto c = val(2);
+            string r;
+            if (n == "v_mad_u16" || n == "v_mad_i16") {
+                r = ir.binary("add", ir.binary("mul", low(a), low(b)), low(c));
+            } else {
+                const bool signed_order = n.substr(n.size() - 4) == "_i16";
+                auto bound = [&](const string &x, const string &y, bool minimum) {
+                    return select(cmp(signed_order ? (minimum ? "slt" : "sgt") : (minimum ? "ult" : "ugt"), x, y), x, y);
+                };
+                auto x = signed_order ? sext(a) : low(a);
+                auto y = signed_order ? sext(b) : low(b);
+                auto z_val = signed_order ? sext(c) : low(c);
+                if (n.substr(2, 4) == "med3") {
+                    r = bound(bound(x, y, true), bound(bound(x, y, false), z_val, true), false);
+                } else {
+                    bool minimum = n.substr(2, 3) == "min";
+                    r = bound(bound(x, y, minimum), z_val, minimum);
+                }
+            }
+            z = ir.binary("or", ir.binary("and", read(i.dst), "4294901760"), low(r));
         } else if (n == "v_sad_u8" || n == "v_sad_hi_u8" || n == "v_sad_u16" || n == "v_sad_u32" || n == "v_msad_u8") {
             // Sums of unsigned absolute differences plus S2, modulo 2^32 (#2987), as gfx2hlsl.py's sad_u8, sad4_u8,
             // sad_u16 and sad_u32 helpers and tools/pixel_aot.py compute them. v_msad_u8 skips each byte whose S1
