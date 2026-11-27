@@ -907,23 +907,28 @@ and Dispatch takes). The cache persists: a later run reads every published `<key
 requests. The watcher's first pass retries every earlier failure once, so a translator update reaches
 requests that failed in an earlier run; after that, a request whose `<key>.fail` is newer than its
 ready marker is not retried during the run (the runtime writes each request once and never rewrites
-it). The one-shot `--pending` scan retries every failure. An unexpected translator error is written
-to `<key>.fail` as `translator error: ...`, ending with the function, file name and line that raised
-it, skipping standard-library frames (`(in scalar_select, gfx2hlsl.py line 1234)`), instead of
-stopping the scan. An operand refusal
+it). The one-shot `--pending` scan retries every failure unless `--skip-failed` (`-s`) or
+`X2W_SKIP_FAILED=1` is set, which skips requests whose `<key>.fail` is already up to date with their
+ready marker and stream description. During `--watch`, published requests are kept in an in-memory
+completion set so repeated passes skip re-reading container bytecode from disk when
+request files, descriptions and published stage metadata are unchanged. An unexpected
+translator error is written to `<key>.fail` as `translator error: ...`, ending with the function, file
+name and line that raised it, skipping standard-library frames (`(in scalar_select, gfx2hlsl.py line 1234)`),
+instead of stopping the scan. An operand refusal
 in `<key>.fail` names the instruction that refused it (`operand '-v30' in v_and_b32_e64`); the
 refusal's own message, which `--refusals` counts, stays `operand '-v30'`. A worker killed from outside
 (for example out of memory) ends that watcher pass only; its requests are retried on the next pass.
 FXC is located as described for `X2W_SHADER_CACHE` under [Switches](#switches). A scan with more than
 one pending request translates them in parallel processes, one per logical processor (at most 61 on
-Windows, the `ProcessPoolExecutor` limit) unless `X2W_TRANSLATE_JOBS` sets the count; each request
-writes only its own files. On a 16-thread host,
+Windows, the `ProcessPoolExecutor` limit) unless `--jobs <n>` (`-j <n>` or `--jobs=<n>`) or
+`X2W_TRANSLATE_JOBS` sets the count; each request writes only its own files. On a 16-thread host,
 3,513 requests (132 translated, 3,381 refused) took 56.9 s with one process and 7.8 s in parallel,
 with byte-identical results.
 
 Check with `python3 -B tests/startup_gfx2hlsl_watch_check.py` (ctest `startup_gfx2hlsl_watch`): a
 request without its ready marker is not consumed, the watcher retries an earlier failure once and
-then leaves failures alone, it translates a request written while it runs, four parallel workers
+then leaves failures alone, `--skip-failed` skips up-to-date failures, the in-memory cache skips
+published requests without re-checking container bytecode, four parallel workers
 print the same results and write the same failures as one, an unexpected translator error becomes
 `<key>.fail`, and an invalid `X2W_TRANSLATE_JOBS` falls back to the processor count.
 `startup_run_ps1` checks that `-Translate` starts the watcher on the cache and stops it together

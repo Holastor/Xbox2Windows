@@ -12242,7 +12242,16 @@ REFUSALS_CAVEAT = ('Counts after the first refusal are approximate. Skipped inst
 def request_keys(out_dir, compute=False):
     """Graphics request keys (ready marker .a or .rtv), or with compute, slot 67 compute keys (.c67)."""
     pattern = r'req_([0-9a-f]{16})\.c67' if compute else r'req_([0-9a-f]{16})\.(?:a|rtv)'
-    for name in sorted(os.listdir(out_dir)):
+    names = []
+    try:
+        for entry in os.scandir(out_dir):
+            # Fast filename pre-filter before regex matching.
+            if entry.name.startswith('req_') and entry.is_file():
+                names.append(entry.name)
+    except OSError:
+        # Directory does not exist or cannot be scanned; yields no requests.
+        return
+    for name in sorted(names):
         match = re.fullmatch(pattern, name)
         if match:
             yield int(match.group(1), 16)
@@ -12448,27 +12457,59 @@ def main():
             for ext, blob in (('.a', a), ('.b', b), ('.root', root)):
                 open(os.path.join(out_dir, 'req_%016x%s' % (key, ext)), 'wb').write(blob)
             print('pso %x -> request %016x' % (w & 0xffffff, key))
+    skip_failed = any(arg in ('--skip-failed', '-s') for arg in sys.argv[1:]) or os.environ.get('X2W_SKIP_FAILED') in ('1', 'true', 'True')
+    jobs = None
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith('--jobs='):
+            with suppress(ValueError):
+                jobs = int(arg.split('=', 1)[1])
+        elif arg in ('-j', '--jobs') and i + 1 < len(args):
+            i += 1
+            with suppress(ValueError):
+                jobs = int(args[i])
+        i += 1
+
     if sys.argv[1] == '--watch':
         # --watch <dir> [seconds]: translate requests as a running title writes them, until stopped
-        interval = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
-        # The first pass retries earlier failures once (the runtime never rewrites a request, so a
-        # translator fix would otherwise not reach them); later passes skip failures already written.
-        skip_failed = False
+        interval = 2.0
+        args3 = sys.argv[3:]
+        i = 0
+        while i < len(args3):
+            arg = args3[i]
+            if arg in ('-j', '--jobs'):
+                i += 2
+                continue
+            if arg.startswith('-'):
+                i += 1
+                continue
+            with suppress(ValueError):
+                interval = float(arg)
+                break
+            i += 1
+        # The first pass retries earlier failures once unless --skip-failed / X2W_SKIP_FAILED is set;
+        # later passes skip failures already written.
+        completed = {}
         while True:
-            if watch_pass(out_dir, skip_failed):
+            if watch_pass(out_dir, skip_failed, jobs=jobs, completed=completed):
                 skip_failed = True
             time.sleep(interval)
-    translate_pending(out_dir)
+    translate_pending(out_dir, skip_failed=skip_failed, jobs=jobs)
 
 
 
 
-def watch_pass(out_dir, skip_failed):
+def watch_pass(out_dir, skip_failed, jobs=None, completed=None):
     """One --watch pass. A worker killed from outside (out of memory) breaks the pool; the pass is
-    reported and its requests are retried on the next pass instead of ending the watcher."""
+    reported and its requests are retried on the next pass instead of ending the watcher.
+
+    The completed dict is threaded across watch iterations to avoid re-reading published stage bytecode.
+    """
     from concurrent.futures.process import BrokenProcessPool
     try:
-        translate_pending(out_dir, skip_failed=skip_failed)
+        translate_pending(out_dir, skip_failed=skip_failed, jobs=jobs, completed=completed)
         return True
     except BrokenProcessPool as error:
         print('translation pass interrupted, retrying: %s' % error, file=sys.stderr, flush=True)
@@ -12513,23 +12554,31 @@ def translate_one(out_dir, key):
         return reason
 
 
-def translation_jobs():
-    try:
-        jobs = int(os.environ.get('X2W_TRANSLATE_JOBS') or 0)
-    except ValueError:
-        jobs = 0
+def translation_jobs(jobs=None):
+    if jobs is None:
+        try:
+            jobs = int(os.environ.get('X2W_TRANSLATE_JOBS') or 0)
+        except ValueError:
+            jobs = 0
+    else:
+        try:
+            jobs = int(jobs)
+        except (ValueError, TypeError):
+            jobs = 0
     jobs = jobs if jobs > 0 else os.cpu_count() or 1
     return min(jobs, 61) if os.name == 'nt' else jobs  # ProcessPoolExecutor refuses more than 61 on Windows
 
 
-def translate_pending(out_dir, skip_failed=False, jobs=None):
+def translate_pending(out_dir, skip_failed=False, jobs=None, completed=None):
     """Translate every request that has no result yet. The runtime writes the ready markers last.
 
     Requests are independent (each writes only its own <key>.* files), so several run in parallel
-    processes; X2W_TRANSLATE_JOBS (default: the processor count, at most 61 on Windows) sets how many.
+    processes; X2W_TRANSLATE_JOBS or --jobs (default: the processor count, at most 61 on Windows) sets how many.
     """
-    keys = pending_keys(out_dir, skip_failed)
-    jobs = min(jobs or translation_jobs(), len(keys))
+    keys = pending_keys(out_dir, skip_failed, completed=completed)
+    if not keys:
+        return
+    jobs = min(translation_jobs(jobs), len(keys))
     if jobs < 2:
         for key in keys:
             print('%016x: %s' % (key, translate_one(out_dir, key)), flush=True)
@@ -12541,48 +12590,140 @@ def translate_pending(out_dir, skip_failed=False, jobs=None):
             print('%016x: %s' % (key, result), flush=True)
 
 
-def pending_keys(out_dir, skip_failed):
+def pending_keys(out_dir, skip_failed, completed=None):
     keys = []
     manifest_only = os.environ.get('X2W_FXC') == ''
-    for name in sorted(os.listdir(out_dir)):
-        m = re.fullmatch(r'req_([0-9a-f]{16})\.(a|rtv|c67|m57)', name)
-        if not m:
+    try:
+        entries = list(os.scandir(out_dir))
+    except OSError:
+        return keys
+
+    files = {}
+    req_items = []
+    for entry in entries:
+        try:
+            if entry.is_file():
+                files[entry.name] = entry
+                if entry.name.startswith('req_'):
+                    m = re.fullmatch(r'req_([0-9a-f]{16})\.(a|rtv|c67|m57)', entry.name)
+                    if m:
+                        req_items.append((entry.name, entry, m))
+        except OSError:
             continue
+
+    req_items.sort(key=lambda item: item[0])
+
+    for name, entry, m in req_items:
         key = int(m.group(1), 16)
-        result = os.path.join(out_dir, '%016x' % key)
-        mesh = m.group(2) == 'm57'
-        stages = ('.cs.cso',) if m.group(2) == 'c67' else ('.ms57.cso', '.ps57.cso') if mesh else ('.vs.cso', '.ps.cso')
-        ready_bytecode = has_complete_mesh57_bytecode if mesh else has_bytecode
-        manifest = result + ('.ms57.txt' if mesh else '.txt')
-        # A published manifest with bytecode (or manifest-only mode) is done; otherwise resume (#2008). The stream
-        # description the translation reads (request_source: the request's own, or an RTV variant's source
-        # pipeline's) is a dependency like the request file. Rewritten after the result was published, the result
-        # is checked again, so one translated with other masks is not kept in silence; rewritten after a refusal,
-        # the request is retried.
+        ext = m.group(2)
+        base_name = '%016x' % key
+        mesh = ext == 'm57'
+        stages = ('.cs.cso',) if ext == 'c67' else ('.ms57.cso', '.ps57.cso') if mesh else ('.vs.cso', '.ps.cso')
+        manifest_name = base_name + ('.ms57.txt' if mesh else '.txt')
+
+        if completed is not None and key in completed:
+            saved = completed[key]
+            saved_req_mtime, saved_base, saved_psin_mtime = saved[:3]
+            saved_stage_meta = saved[3] if len(saved) > 3 else None
+            try:
+                current_req_mtime = entry.stat().st_mtime
+            except OSError:
+                current_req_mtime = None
+            if current_req_mtime == saved_req_mtime and manifest_name in files:
+                psin_name = 'req_%016x.psin' % saved_base
+                psin_entry = files.get(psin_name)
+                try:
+                    current_psin_mtime = psin_entry.stat().st_mtime if psin_entry else None
+                except OSError:
+                    current_psin_mtime = None
+                lost = current_psin_mtime is None and ((base_name + '.psdep') in files)
+                if current_psin_mtime == saved_psin_mtime and not lost:
+                    if manifest_only:
+                        continue
+                    if saved_stage_meta is not None:
+                        def stage_valid(s_name, s_size, s_mtime):
+                            se = files.get(s_name)
+                            if se is None:
+                                return False
+                            try:
+                                st = se.stat()
+                                return st.st_size == s_size and st.st_mtime == s_mtime
+                            except OSError:
+                                return False
+                        if saved_stage_meta and all(stage_valid(sn, sz, mt) for sn, sz, mt in saved_stage_meta):
+                            continue
+
         described = None
         lost = False
-        if m.group(2) in ('a', 'rtv'):
-            with suppress(Unsupported, OSError, UnicodeError):  # no description, or a variant line refused later
-                described = os.path.getmtime(request_source(out_dir, key)[3])
-            # A result translated with a description recorded it (dependency_record). With that description gone,
-            # the result is checked again and withdrawn; a legacy request without a record is not read again.
-            lost = described is None and os.path.isfile(result + '.psdep')
-        if os.path.isfile(manifest) and not lost and not (
-                described is not None and described > os.path.getmtime(manifest)):
-            if manifest_only or all(ready_bytecode(result + s) for s in stages):
+        base = key
+        if ext in ('a', 'rtv'):
+            if ext == 'rtv':
+                with suppress(Unsupported, OSError, UnicodeError):
+                    _, base, _, _ = request_source(out_dir, key)
+            psin_name = 'req_%016x.psin' % base
+            psin_entry = files.get(psin_name)
+            if psin_entry is not None:
+                with suppress(OSError):
+                    described = psin_entry.stat().st_mtime
+            lost = described is None and ((base_name + '.psdep') in files)
+
+        manifest_entry = files.get(manifest_name)
+        manifest_mtime = None
+        if manifest_entry is not None:
+            with suppress(OSError):
+                manifest_mtime = manifest_entry.stat().st_mtime
+
+        if manifest_entry is not None and not lost and not (
+                described is not None and manifest_mtime is not None and described > manifest_mtime):
+            ready = False
+            published_stages = []
+            if manifest_only:
+                ready = True
+                published_stages = [manifest_name]
+            elif mesh:
+                if all((base_name + s) in files and has_complete_mesh57_bytecode(os.path.join(out_dir, base_name + s)) for s in stages):
+                    ready = True
+                    published_stages = [manifest_name] + [base_name + s for s in stages]
+                elif (base_name + '.ms57.cso') in files and has_complete_mesh57_bytecode(os.path.join(out_dir, base_name + '.ms57.cso')):
+                    with suppress(OSError), open(os.path.join(out_dir, manifest_name), 'rb') as published:
+                        if b'ps none' in published.read().splitlines():
+                            ready = True
+                            published_stages = [manifest_name, base_name + '.ms57.cso']
+            else:
+                def stage_ok(s):
+                    se = files.get(base_name + s)
+                    if se is None:
+                        return False
+                    try:
+                        return se.stat().st_size > 0
+                    except OSError:
+                        return False
+                if all(stage_ok(s) for s in stages):
+                    ready = True
+                    published_stages = [manifest_name] + [base_name + s for s in stages]
+
+            if ready:
+                if completed is not None:
+                    with suppress(OSError):
+                        stage_meta = tuple((name, files[name].stat().st_size, files[name].stat().st_mtime)
+                                           for name in published_stages if name in files)
+                        completed[key] = (entry.stat().st_mtime, base, described, stage_meta)
                 continue
-            if mesh and has_complete_mesh57_bytecode(result + '.ms57.cso'):
-                with suppress(OSError), open(manifest, 'rb') as published:
-                    if b'ps none' in published.read().splitlines():
-                        continue
-        fail = os.path.join(out_dir, '%016x.fail' % key)
-        # A repeated pass retries a failure only once its request or its stream description is rewritten. A result
-        # still published without its recorded description is checked even with an older .fail, which a success on
-        # the manifest-only path leaves in place.
-        recheck = lost and os.path.isfile(manifest)
-        if skip_failed and not recheck and os.path.exists(fail) and os.path.getmtime(fail) >= max(
-                os.path.getmtime(os.path.join(out_dir, name)), described or 0):
-            continue
+
+        if completed is not None:
+            completed.pop(key, None)
+
+        fail_name = base_name + '.fail'
+        fail_entry = files.get(fail_name)
+        recheck = lost and (manifest_entry is not None)
+        if skip_failed and not recheck and fail_entry is not None:
+            try:
+                fail_mtime = fail_entry.stat().st_mtime
+                req_mtime = entry.stat().st_mtime
+                if fail_mtime >= max(req_mtime, described or 0):
+                    continue
+            except OSError:
+                pass
         keys.append(key)
     return keys
 
