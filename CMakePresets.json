@@ -34,7 +34,8 @@
         "xmem_run_break_readers_check", "xmem_run_break_readers_control", "xmem_cross_call_merge_check",
         "xmem_placeholder_split_check", "xmem_map_split_first_check", "startup_dstorage_break_window_check",
         "xmem_page_runs_device_check", "linear_buffer_backing_check",
-        "bcpack_formats_check", "startup_stub_consumer"
+        "bcpack_formats_check", "startup_stub_consumer",
+        "startup_stub_xg_xs", "xg_swizzle_select_check", "startup_stream_consumer"
       ]
     },
     { "name": "release", "configurePreset": "release" },
