@@ -20,6 +20,7 @@ struct StartupBc7Input {
     // A 64x64 R8G8B8A8 texture with explicit 4KB_S layout (0x105). When tiled is true, data is tiled
     // via XG slot 8; when false, raw linear bytes are placed as a negative swizzle control.
     bool rgba8_4k_s = false;
+    bool display64k = false;
 };
 
 int check_stream_draw(IDXGIAdapter* adapter, void* guest, void* pso, const char* pixels,
