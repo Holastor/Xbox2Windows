@@ -284,8 +284,8 @@ struct Gfx10Texture {
 
         if (block_log2 >= 12 && levels > 1) {
             for (UINT i = 0; i < levels; ++i) {
-                const UINT pw = ((width + block_dim - 1) / block_dim + (1u << i) - 1) >> i;
-                const UINT ph = ((height + block_dim - 1) / block_dim + (1u << i) - 1) >> i;
+                const UINT pw = extent_columns(i);
+                const UINT ph = extent_rows(i);
                 if (pw <= tail_max_w && ph <= tail_max_h && (levels - i) <= max_in_tail) {
                     first_tail = i;
                     break;
@@ -295,8 +295,8 @@ struct Gfx10Texture {
 
         UINT64 offset = (first_tail < levels) ? tile_bytes : 0;
         for (int i = static_cast<int>(first_tail) - 1; i >= 0; --i) {
-            const UINT cols = columns(static_cast<UINT>(i));
-            const UINT r = rows(static_cast<UINT>(i));
+            const UINT cols = extent_columns(static_cast<UINT>(i));
+            const UINT r = extent_rows(static_cast<UINT>(i));
             tiles_w[i] = (cols + tile_width - 1) / tile_width;
             tiles_h[i] = (r + tile_height - 1) / tile_height;
             mip_start[i] = offset;
@@ -328,8 +328,8 @@ struct Gfx10Texture {
         first_tail = levels;
         UINT64 offset = 0;
         for (int i = static_cast<int>(levels) - 1; i >= 0; --i) {
-            const UINT cols = columns(static_cast<UINT>(i));
-            const UINT r = rows(static_cast<UINT>(i));
+            const UINT cols = extent_columns(static_cast<UINT>(i));
+            const UINT r = extent_rows(static_cast<UINT>(i));
             tiles_w[i] = (cols + tile_width - 1) / tile_width;
             tiles_h[i] = r;
             const UINT64 pitch = UINT64{tiles_w[i]} * 256;
@@ -339,6 +339,19 @@ struct Gfx10Texture {
         total_slice_bytes = offset;
     }
 
+    // Extents for layout allocation and tile strides (AMD addrlib GetMipSize / ShiftCeil)
+    UINT extent_columns(UINT mip) const
+    {
+        const UINT cols0 = (width + block_dim - 1) / block_dim;
+        return (std::max)(1u, (cols0 + (1u << mip) - 1) >> mip);
+    }
+    UINT extent_rows(UINT mip) const
+    {
+        const UINT rows0 = (height + block_dim - 1) / block_dim;
+        return (std::max)(1u, (rows0 + (1u << mip) - 1) >> mip);
+    }
+
+    // Subresource dimensions in elements for texel copying and bounds checking
     UINT columns(UINT mip) const
     {
         return ((std::max)(1u, width >> mip) + block_dim - 1) / block_dim;
@@ -349,11 +362,11 @@ struct Gfx10Texture {
     }
     UINT tiles_wide(UINT mip) const
     {
-        return (mip < first_tail) ? tiles_w[mip] : (columns(mip) + tile_width - 1) / tile_width;
+        return (mip < first_tail) ? tiles_w[mip] : (extent_columns(mip) + tile_width - 1) / tile_width;
     }
     UINT tiles_high(UINT mip) const
     {
-        return (mip < first_tail) ? tiles_h[mip] : (rows(mip) + tile_height - 1) / tile_height;
+        return (mip < first_tail) ? tiles_h[mip] : (extent_rows(mip) + tile_height - 1) / tile_height;
     }
     UINT padded_columns(UINT mip) const
     {

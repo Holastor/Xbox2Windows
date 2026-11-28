@@ -16782,14 +16782,14 @@ ctest --preset release --no-tests=error --output-on-failure -R '^(startup_xg_bc_
 `Gfx10Texture` (`src/startup_stubs/gfx10_texture.h`) implements the runtime tiling and detiling computer for GFX10 textures across 256 B, 4 KiB, and 64 KiB blocks in standard (`_S`) and display (`_D`) modes (explicit layouts `0x101`, `0x102`, `0x105`, `0x106`, `0x109`, `0x10a`), as well as multi-mip and multi-slice linear layout `0x100` (packed slices, smallest mip first). It supports 1-, 2-, 4-, 8-, and 16-byte elements (including BC1 to BC7 block-compressed formats):
 
 - XG texture-computer stand-in (`src/startup_stubs/xg_xs.cpp`) provides slot 2 (layout query, mip starts, alignment), slot 3 (total allocation size), slot 6 (element coordinate offset query), slot 8 (`CopyIntoSubresource` for linear to tiled upload), and slot 9 (`CopyFromSubresource` for tiled to linear readback).
-- On GFX10.3 / RDNA2 with RbPlus enabled (Scarlett hardware), AMD AddrLib (`src/amd/addrlib`) selects `GFX10_SW_256_D_RBPLUS_PATINFO` (pattern index 39: `"----x0x1y0y1x2y2"`), where bit 6 is $x_2$ and bit 7 is $y_2$.
+- In AMD AddrLib (`src/amd/addrlib`) configured for GFX10.3 / RDNA2 (Navi21 reference with `supportRbPlus = 1`), `GetSwizzlePatternInfo` selects `GFX10_SW_256_D_RBPLUS_PATINFO` (pattern index 39: `"----x0x1y0y1x2y2"`), where bit 6 is $x_2$ and bit 7 is $y_2$, while Navi1x without RbPlus selects pattern 2 (`"----x0x1y0y1y2x2"`). Whether console hardware matches the RbPlus pattern remains an open hypothesis pending independent hardware measurement.
 - The desktop draw uploader (`src/startup_stubs/d3d12_draw.inl`) detiles placed CPU textures via `is_gfx10_tiled` for all explicit GFX10 tiled modes and multi-mip or array linear (0x100) textures into desktop D3D12 copyable footprints on upload.
-- `xg_gfx10_tiling_reference` independently compares `Gfx10Texture` against Mesa 25.1.0 AMD AddrLib on Navi21 for 22 surface shapes, validating surface sizes, slice strides, base alignments, mip offsets, and 349,547 coordinate addresses with 0 mismatches.
+- `xg_gfx10_tiling_reference` independently compares `Gfx10Texture` against Mesa 25.1.0 AMD AddrLib on Navi21 for 23 surface shapes, validating surface sizes, slice strides, base alignments, mip offsets, and coordinate addresses with 0 mismatches.
 - `startup_xg_gfx10_runtime` tests layout queries, slot-6 coordinate offsets, slot-8 tiling, slot-9 detiling, pinned AddrLib offsets across all five element sizes, implicit layout routing, and negative controls.
 - `startup_xg_bc7_draw_{warp,hardware}` executes end-to-end draw tests with wrapped XG uploads for 4 KiB standard RGBA8 (`rgba8_4k_s`), 3-mip linear RGBA8 (`rgba8_linear_3m`), and their respective negative controls.
 
 ```powershell
-cmake --build --preset dev --target startup_stub_xg_xs startup_stub_consumer xg_swizzle_select_check
+cmake --build --preset dev --target startup_stub_xg_xs startup_stream_consumer xg_swizzle_select_check
 ctest --preset dev --no-tests=error -R '^(startup_xg_gfx10_runtime|xg_gfx10_tiling_reference|startup_xg_bc7_draw_(warp|hardware))$' -V
 ```
 
