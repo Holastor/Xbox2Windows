@@ -20,6 +20,10 @@ struct StartupBc7Input {
     // A 64x64 R8G8B8A8 texture with explicit 4KB_S layout (0x105). When tiled is true, data is tiled
     // via XG slot 8; when false, raw linear bytes are placed as a negative swizzle control.
     bool rgba8_4k_s = false;
+    // A 64x64 R8G8B8A8 texture with 3 mips and explicit linear layout (0x100). When tiled is true,
+    // data is placed via XG slot 8 (smallest mip first: mips 2, 1, 0); when false, data is placed
+    // at offset 0 in desktop footprint order as a negative layout control.
+    bool rgba8_linear_3m = false;
     bool display64k = false;
 };
 

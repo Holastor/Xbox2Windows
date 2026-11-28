@@ -1,0 +1,1 @@
+tests/startup_xg_gfx10_check.py

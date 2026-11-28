@@ -138,6 +138,40 @@ def check(work, consumer, dxc, backend):
     assert diff_count >= 3000, f"{backend}: negative control only differed on {diff_count}/4096 pixels"
     print(f"{backend}: 64x64 rgba8_4k_s negative swizzle control confirmed ({diff_count}/4096 pixels differ)")
 
+    # 3. Multi-mip linear upload (RGBA8 64x64 3-mip 0x100) placed smallest-first by XG slot 8,
+    # detiled/uploaded by upload_texture via is_gfx10_tiled.
+    if image.exists():
+        image.unlink()
+    result = subprocess.run(base + ["64", "64", "rgba8_linear_3m"], env=env, capture_output=True, text=True)
+    print(result.stdout, end="")
+    for line in result.stderr.splitlines():
+        if "debug layer:" in line or "x2w-d3d12-debug " in line:
+            print(line)
+    if result.returncode or "-> drawn;" not in result.stderr:
+        raise RuntimeError(f"{backend} 64x64 rgba8_linear_3m draw failed ({result.returncode})\n{result.stderr}")
+    actual_linear_3m = image.read_bytes()
+    assert len(actual_linear_3m) == len(rgba8_reference), f"rgba8_linear_3m: read {len(actual_linear_3m)} bytes, expected {len(rgba8_reference)}"
+    if actual_linear_3m != rgba8_reference:
+        first = next(i for i in range(0, len(rgba8_reference), 4) if actual_linear_3m[i:i + 4] != rgba8_reference[i:i + 4])
+        x, y = first // 4 % 64, first // 4 // 64
+        mismatches.append(f"{backend} 64x64 rgba8_linear_3m: pixel ({x}, {y}) "
+                          f"read {actual_linear_3m[first:first + 4].hex()}, expected {rgba8_reference[first:first + 4].hex()}")
+    else:
+        print(f"{backend}: 64x64 rgba8_linear_3m draw matched all {64 * 64} reference pixels")
+
+    # 4. Negative control: linear 3-mip texture placed in standard desktop footprint order (offset 0 for mip 0)
+    # must fail to match reference because upload_texture reads mip 0 from XG's smallest-first offset 12288.
+    if image.exists():
+        image.unlink()
+    result = subprocess.run(base + ["64", "64", "rgba8_linear_3m_desktop"], env=env, capture_output=True, text=True)
+    if result.returncode or "-> drawn;" not in result.stderr:
+        raise RuntimeError(f"{backend} 64x64 rgba8_linear_3m_desktop draw failed ({result.returncode})\n{result.stderr}")
+    actual_linear_desktop = image.read_bytes()
+    assert actual_linear_desktop != rgba8_reference, f"{backend}: negative control failed, desktop layout unexpectedly matched reference"
+    diff_count = sum(actual_linear_desktop[i:i + 4] != rgba8_reference[i:i + 4] for i in range(0, len(rgba8_reference), 4))
+    assert diff_count >= 1000, f"{backend}: negative control only differed on {diff_count}/4096 pixels"
+    print(f"{backend}: 64x64 rgba8_linear_3m negative layout control confirmed ({diff_count}/4096 pixels differ)")
+
     if mismatches:
         raise AssertionError("\n".join(mismatches))
     return 0

@@ -860,8 +860,12 @@ int main(int argc, char** argv)
                std::strcmp(argv[9], "tiled") == 0};
         bc7.small4k = std::strcmp(argv[9], "small4k") == 0;
         bc7.rgba8_4k_s = std::strcmp(argv[9], "rgba8_4k_s") == 0 || std::strcmp(argv[9], "rgba8_4k_s_untiled") == 0;
+        bc7.rgba8_linear_3m = std::strcmp(argv[9], "rgba8_linear_3m") == 0 || std::strcmp(argv[9], "rgba8_linear_3m_desktop") == 0;
         if (bc7.rgba8_4k_s) {
             bc7.tiled = std::strcmp(argv[9], "rgba8_4k_s") == 0;
+            if (bc7.width != 64 || bc7.height != 64) return 2;
+        } else if (bc7.rgba8_linear_3m) {
+            bc7.tiled = std::strcmp(argv[9], "rgba8_linear_3m") == 0;
             if (bc7.width != 64 || bc7.height != 64) return 2;
         } else if (bc7.small4k) {
             if (bc7.width != 32 || bc7.height != 32) return 2;

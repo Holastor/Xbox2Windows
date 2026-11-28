@@ -1748,7 +1748,7 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
     const bool detile_console = console || placed_display_bc7;
     const bool is_gfx10_tiled = !placed_display_bc7 && !tiled_address && !single && original &&
                                 x2w_startup::Gfx10Texture::supports(original->console) &&
-                                x2w_startup::Gfx10Texture::is_tiled(original->console);
+                                (x2w_startup::Gfx10Texture::is_tiled(original->console) || mips > 1 || slices > 1);
     // Any other texture slot 70 publishes holds its texels in the console layout its description names
     // (gfx10_layout.h, address_texture.h).
     const bool tiled_bc7 = !is_gfx10_tiled && !tiled_chain && !tiled_address && !placed_display_bc7 && written.bc7_width != 0;
@@ -1800,7 +1800,7 @@ bool upload_texture(Wrapper* self, Wrapper* resource, ID3D12Resource* texture)
     const bool announced = state.generation != generation;
     const UINT elapsed = static_cast<UINT>(frame_number) - static_cast<UINT>(state.checked_frame);
     // A single texel (at most 16 bytes) is rehashed on every bind, so a write between two draws is seen.
-    const bool recheck = single || ((tiled_address || is_gfx10_tiled) ? elapsed != 0
+    const bool recheck = single || ((tiled_address || tiled_chain) ? elapsed != 0
         : x2w_startup::recheck_cpu_texture(desc, total, elapsed));
     const bool reusable = state.done && (!state.pending_list || state.pending_list == list);
     if (reusable && !announced && !recheck) return true;
