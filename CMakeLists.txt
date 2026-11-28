@@ -2322,7 +2322,7 @@ endforeach()
 # Negative control: without slot 43 the first forwarded case is refused, and the fixture must report it.
 add_test(NAME startup_list_dispatch_native_skip_srv_warp_control COMMAND startup_list_dispatch_native warp skip-srv)
 set_tests_properties(startup_list_dispatch_native_skip_srv_warp_control PROPERTIES TIMEOUT 60
-    PASS_REGULAR_EXPRESSION "bound: expected no Dispatch line, got 1 Dispatch line\\(s\\)[\r\n]+  x2w-render Dispatch\\(2, 3, 1\\) refused: a compute root SRV is not bound")
+    PASS_REGULAR_EXPRESSION "bound: expected no Dispatch line, got 1 Dispatch line\\(s\\)[\r\n]+  x2w-render Dispatch\\(2, 3, 1\\) refused: a compute root argument is not bound")
 target_sources(offscreen_check PRIVATE tests/startup_image_3d.cpp)
 target_sources(offscreen_check PRIVATE tests/startup_image_store.cpp)
 target_sources(offscreen_check PRIVATE tests/startup_flat_param.cpp)

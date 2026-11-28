@@ -3408,16 +3408,18 @@ void __stdcall list_compute_table(Wrapper* self, UINT parameter, u64 gpu_handle)
         log("x2w-render compute descriptor table dropped: parameter %u (%u parameters are kept)", parameter,
             x2w_startup::ComputeTables::max_parameters);
 }
-// Keeps the words of a root constants call; a call outside the kept words is logged and cut or dropped.
-static void store_root_constants(x2w_root_constants::Store& store, const char* kind, UINT parameter, UINT count,
+// Keeps the words of a root constants call; a call outside the kept words is logged and cut or dropped. Returns the
+// number of words from `offset` that the store kept, so the caller forwards exactly the words the store recorded.
+static UINT store_root_constants(x2w_root_constants::Store& store, const char* kind, UINT parameter, UINT count,
                                  const std::uint32_t* data, UINT offset, UINT capacity = x2w_root_constants::words_per_parameter)
 {
-    if (!count || !x2w_local::readable(data, std::size_t{count} * 4)) return;
+    if (!count || !x2w_local::readable(data, std::size_t{count} * 4)) return 0;
     const auto result = store.set(parameter, count, data, offset, capacity);
     static LONG refused;
     if (result != x2w_root_constants::Result::stored && first_calls(refused, 4))
         log("x2w-render %s root constants %s: parameter %u, offset %u, count %u (%u words are kept)", kind,
             result == x2w_root_constants::Result::dropped ? "dropped" : "truncated", parameter, offset, count, capacity);
+    return result == x2w_root_constants::Result::dropped ? 0 : (std::min)(count, capacity - offset);
 }
 // List slot 40 (desktop 36 + 4), SetGraphicsRoot32BitConstants(parameter, count, data, offset).
 void __stdcall list_root_constants(Wrapper* self, UINT parameter, UINT count, const std::uint32_t* data, UINT offset)
@@ -3445,11 +3447,9 @@ void __stdcall list_compute_constant(Wrapper* self, UINT parameter, UINT value, 
     if (valid_param) {
         capacity = (std::min)(x2w_root_constants::max_words_per_parameter, (*params)[parameter].constants_count);
     }
-    store_root_constants(pass.compute_constants, "compute", parameter, 1, &value, offset, capacity);
-    if (auto* list = recording(self); list && pass.desktop_compute_root && valid_param) {
-        if (parameter < 16 && offset < (*params)[parameter].constants_count)
-            list->SetComputeRoot32BitConstant(parameter, value, offset);
-    }
+    const UINT kept = store_root_constants(pass.compute_constants, "compute", parameter, 1, &value, offset, capacity);
+    if (auto* list = recording(self); list && pass.desktop_compute_root && valid_param && kept)
+        list->SetComputeRoot32BitConstant(parameter, value, offset);
 }
 // List slot 39 (desktop 35 + 4), SetComputeRoot32BitConstants(parameter, count, data, offset).
 void __stdcall list_compute_constants(Wrapper* self, UINT parameter, UINT count, const std::uint32_t* data, UINT offset)
@@ -3462,12 +3462,10 @@ void __stdcall list_compute_constants(Wrapper* self, UINT parameter, UINT count,
     if (valid_param) {
         capacity = (std::min)(x2w_root_constants::max_words_per_parameter, (*params)[parameter].constants_count);
     }
-    store_root_constants(pass.compute_constants, "compute", parameter, count, data, offset, capacity);
-    if (auto* list = recording(self); list && pass.desktop_compute_root && valid_param) {
-        const UINT declared = (*params)[parameter].constants_count;
-        if (count && parameter < 16 && offset < declared && count <= declared - offset)
-            list->SetComputeRoot32BitConstants(parameter, count, data, offset);
-    }
+    // Forward exactly the words the store kept, so a dispatch never runs with words one side has and the other does not.
+    const UINT kept = store_root_constants(pass.compute_constants, "compute", parameter, count, data, offset, capacity);
+    if (auto* list = recording(self); list && pass.desktop_compute_root && valid_param && kept)
+        list->SetComputeRoot32BitConstants(parameter, kept, data, offset);
 }
 // List slot 47 (desktop 43 + 4), IASetIndexBuffer(view).
 void __stdcall list_index_buffer(Wrapper* self, const D3D12_INDEX_BUFFER_VIEW* view)

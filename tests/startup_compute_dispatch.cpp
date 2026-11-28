@@ -6,10 +6,11 @@
 //   - CommandList slot 33: SetComputeRootSignature
 //   - CommandList slot 25: SetPipelineState (compute)
 //   - CommandList slot 37: SetComputeRoot32BitConstant
-//   - CommandList slot 39: SetComputeRoot32BitConstants (32 constants, range checking, out-of-range write rejected)
+//   - CommandList slot 39: SetComputeRoot32BitConstants (32 constants, range checking, a write past the declared words is cut to the kept words)
 //   - CommandList slot 45: SetComputeRootUnorderedAccessView (placed subrange offset handling, reject check)
 //   - CommandList slot 14: Dispatch(x, y, z)
 //   - Correct execution on GPU, subrange write to offset 256 and sentinel preserved at offset 0.
+//   - Restoring the compute root after a same-layout root wrote its own constants and UAV through it.
 //   - Negative controls: Dispatch with 0 threads or without a compute pipeline.
 //   - Zero debug layer errors and healthy desktop device.
 //
@@ -238,6 +239,7 @@ int main(int argc, char** argv)
     *reinterpret_cast<UINT*>(reinterpret_cast<char*>(init_map) + 128) = 0x33333333u; // Sentinel pinning unset constants mutant
     *reinterpret_cast<UINT*>(reinterpret_cast<char*>(init_map) + 256) = 0x22222222u; // Initial value at subrange
     *reinterpret_cast<UINT*>(reinterpret_cast<char*>(init_map) + 384) = 0x44444444u; // Sentinel pinning unset UAV / alignment mutant
+    *reinterpret_cast<UINT*>(reinterpret_cast<char*>(init_map) + 448) = 0x55555555u; // Target for the cut-write dispatch
     init_buffer->Unmap(0, nullptr);
 
     // 4. Create CommandQueue, CommandAllocator, CommandList, Fence
@@ -342,8 +344,13 @@ int main(int argc, char** argv)
     slot<ConstantFn>(guest_list.Get(), 37)(guest_list.Get(), 16, 5, 0);
 
     // Out-of-range negative controls on parameter 1:
-    // Control Const-C: count exceeds parameter bound (count 33) -> rejected
+    // Control Const-C: count exceeds parameter bound (count 33) -> cut to the 32 words both sides keep.
+    // Bind a UAV with its own target first: this Dispatch must see the same 32 words on the desktop list, so a
+    // store that marks all 32 words bound while the forward is skipped would write 0 here instead of 39.
+    const u64 guest_subrange_va_448 = guest_base_va + 448;
+    slot<UavFn>(guest_list.Get(), 45)(guest_list.Get(), 0, guest_subrange_va_448);
     slot<ConstantsFn>(guest_list.Get(), 39)(guest_list.Get(), 1, 33, constants_32.data(), 0);
+    slot<DispatchFn>(guest_list.Get(), 14)(guest_list.Get(), 1, 1, 1);
     // Control Const-D: offset exceeds parameter bound (offset 32) -> rejected
     slot<ConstantsFn>(guest_list.Get(), 39)(guest_list.Get(), 1, 1, constants_32.data(), 32);
     slot<ConstantFn>(guest_list.Get(), 37)(guest_list.Get(), 1, 999, 32);
@@ -378,13 +385,16 @@ int main(int argc, char** argv)
     // Bind valid nonzero aligned subrange UAV at offset 256
     slot<UavFn>(guest_list.Get(), 45)(guest_list.Get(), 0, guest_subrange_va_256);
 
-    // Simulate an intervening shim compute pass replacing the compute root signature on the desktop list
-    D3D12_ROOT_SIGNATURE_DESC dummy_desc{};
-    ComPtr<ID3DBlob> dummy_blob;
-    if (FAILED(D3D12SerializeRootSignature(&dummy_desc, D3D_ROOT_SIGNATURE_VERSION_1, &dummy_blob, nullptr))) return 13;
-    ComPtr<ID3D12RootSignature> dummy_root;
-    if (FAILED(probe.desktop->CreateRootSignature(0, dummy_blob->GetBufferPointer(), dummy_blob->GetBufferSize(), IID_PPV_ARGS(&dummy_root)))) return 13;
-    desktop_list->SetComputeRootSignature(dummy_root.Get());
+    // Simulate an intervening shim compute pass: it sets a root with the same layout and writes its own arguments
+    // through it (the indexed-draw validation writes 8 constants through the root it sets). Both the constants and the
+    // UAV are clobbered here, so a dispatch without the restore replay reads 0 at the wrong subrange.
+    ComPtr<ID3D12RootSignature> clobber_root;
+    if (FAILED(probe.desktop->CreateRootSignature(0, serialized_root->GetBufferPointer(), serialized_root->GetBufferSize(),
+                                                  IID_PPV_ARGS(&clobber_root)))) return 13;
+    desktop_list->SetComputeRootSignature(clobber_root.Get());
+    const UINT zero_constants[32]{};
+    desktop_list->SetComputeRoot32BitConstants(1, 32, zero_constants, 0);
+    desktop_list->SetComputeRootUnorderedAccessView(0, placed_res->GetGPUVirtualAddress() + 384);
 
     // Restore the compute root signature, UAV, and all 32 root constants
     if (!x2w_d3d12_fixture_restore_compute_root(guest_list.Get())) return 13;
@@ -423,20 +433,24 @@ int main(int argc, char** argv)
     UINT sentinel_128 = 0;
     UINT result_256 = 0;
     UINT sentinel_384 = 0;
+    UINT result_448 = 0;
     std::memcpy(&sentinel_0, mapped, sizeof(UINT));
     std::memcpy(&sentinel_128, reinterpret_cast<const char*>(mapped) + 128, sizeof(UINT));
     std::memcpy(&result_256, reinterpret_cast<const char*>(mapped) + 256, sizeof(UINT));
     std::memcpy(&sentinel_384, reinterpret_cast<const char*>(mapped) + 384, sizeof(UINT));
+    std::memcpy(&result_448, reinterpret_cast<const char*>(mapped) + 448, sizeof(UINT));
     readback_buffer->Unmap(0, nullptr);
 
     std::printf("sentinel at offset 0: 0x%08x (expected 0x11111111)\n", sentinel_0);
     std::printf("sentinel at offset 128: 0x%08x (expected 0x33333333, pins unset constants mutant)\n", sentinel_128);
     std::printf("subrange value at offset 256: %u (expected 59, scale=5, bias=7, extra=2)\n", result_256);
     std::printf("sentinel at offset 384: 0x%08x (expected 0x44444444, pins unset UAV / alignment mutant)\n", sentinel_384);
+    std::printf("cut-write value at offset 448: %u (expected 39, scale=3, bias=7, extra=2)\n", result_448);
     if (sentinel_0 != 0x11111111u) return 17;
     if (sentinel_128 != 0x33333333u) return 18;
     if (result_256 != 59) return 19;
     if (sentinel_384 != 0x44444444u) return 20;
+    if (result_448 != 39) return 21;
 
 
     // 13. Verify device health and debug layer
